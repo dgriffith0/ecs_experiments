@@ -1,0 +1,23 @@
+[package]
+name = "ecs_experiment"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+anyhow = "1.0.102"
+bevy_ecs = "0.18.1"
+bytemuck = "1.25.0"
+cgmath = "0.18.0"
+env_logger = "0.11.10"
+image = "0.25.10"
+log = "0.4.32"
+pollster = "0.4.0"
+serde = "1.0.228"
+tobj = { version = "4.0.3", features = ["tokio", "async"] }
+wgpu = "29.0.3"
+winit = "0.30.13"
+
+[build-dependencies]
+anyhow = "1.0.102"
+fs_extra = "1.2"
+glob = "0.3.3"
