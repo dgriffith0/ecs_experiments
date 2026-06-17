@@ -1,16 +1,17 @@
+use glam::{Mat3, Mat4, Quat, Vec3};
+
 pub struct Instance {
-    pub position: cgmath::Vector3<f32>,
-    pub rotation: cgmath::Quaternion<f32>,
+    pub position: Vec3,
+    pub rotation: Quat,
 }
 
 impl Instance {
     pub fn to_raw(&self) -> InstanceRaw {
-        let model =
-            cgmath::Matrix4::from_translation(self.position) * cgmath::Matrix4::from(self.rotation);
+        let model = Mat4::from_translation(self.position) * Mat4::from_quat(self.rotation);
         InstanceRaw {
-            model: model.into(),
+            model: model.to_cols_array_2d(),
             // NEW!
-            normal: cgmath::Matrix3::from(self.rotation).into(),
+            normal: Mat3::from_quat(self.rotation).to_cols_array_2d(),
         }
     }
 }
@@ -79,13 +80,12 @@ impl InstanceRaw {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use cgmath::{Deg, One, Quaternion, Rotation3, Vector3};
 
     #[test]
     fn identity_instance_produces_identity_matrices() {
         let instance = Instance {
-            position: Vector3::new(0.0, 0.0, 0.0),
-            rotation: Quaternion::one(),
+            position: Vec3::ZERO,
+            rotation: Quat::IDENTITY,
         };
         let raw = instance.to_raw();
 
@@ -112,12 +112,12 @@ mod tests {
     #[test]
     fn translation_lands_in_model_matrix() {
         let instance = Instance {
-            position: Vector3::new(1.0, 2.0, 3.0),
-            rotation: Quaternion::one(),
+            position: Vec3::new(1.0, 2.0, 3.0),
+            rotation: Quat::IDENTITY,
         };
         let raw = instance.to_raw();
 
-        // cgmath matrices are column-major; the translation occupies the last column.
+        // glam matrices are column-major; the translation occupies the last column.
         assert!((raw.model[3][0] - 1.0).abs() < 1e-6);
         assert!((raw.model[3][1] - 2.0).abs() < 1e-6);
         assert!((raw.model[3][2] - 3.0).abs() < 1e-6);
@@ -127,8 +127,8 @@ mod tests {
     #[test]
     fn rotation_only_leaves_translation_at_origin() {
         let instance = Instance {
-            position: Vector3::new(0.0, 0.0, 0.0),
-            rotation: Quaternion::from_axis_angle(Vector3::unit_z(), Deg(90.0)),
+            position: Vec3::ZERO,
+            rotation: Quat::from_axis_angle(Vec3::Z, 90f32.to_radians()),
         };
         let raw = instance.to_raw();
 

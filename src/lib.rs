@@ -9,5 +9,6 @@ mod resources;
 mod state;
 mod texture;
 mod utils;
+mod voxel;
 
 pub use app::run;

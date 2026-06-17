@@ -6,12 +6,16 @@ edition = "2024"
 [dependencies]
 anyhow = "1.0.102"
 bevy_ecs = "0.18.1"
+block-mesh = "0.2.0"
 bytemuck = "1.25.0"
-cgmath = "0.18.0"
+encase = "0.12.0"
 env_logger = "0.11.10"
+glam = { version = "0.33.1", features = ["encase"] }
 image = "0.25.10"
 log = "0.4.32"
+noise = "0.9.0"
 pollster = "0.4.0"
+rand = "0.9"
 serde = "1.0.228"
 tobj = { version = "4.0.3", features = ["tokio", "async"] }
 wgpu = "29.0.3"

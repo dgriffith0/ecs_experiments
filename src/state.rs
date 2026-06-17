@@ -1,32 +1,36 @@
 use std::sync::Arc;
 
-use cgmath::{InnerSpace, Rotation3, Zero};
+use glam::{Quat, Vec3};
 use wgpu::util::DeviceExt;
 use winit::{event_loop::ActiveEventLoop, keyboard::KeyCode, window::Window};
 
 use crate::camera::CameraSystem;
 use crate::gpu::GpuContext;
-use crate::instance::{Instance, InstanceRaw};
 use crate::light::LightUniform;
 use crate::model::Vertex;
-use crate::{model, resources, texture};
+use crate::voxel::{self, VoxelChunk, VoxelSettings};
+use crate::{model, resources, texture, utils};
 
-const NUM_INSTANCES_PER_ROW: u32 = 10;
+/// Side length (in chunks) of the flat voxel chunk grid.
+const CHUNK_GRID_SIZE: u32 = 4;
 
 // This will store the state of our game
 pub struct State {
     ctx: GpuContext,
     window_background_color: wgpu::Color,
-    render_pipeline: wgpu::RenderPipeline,
     camera: CameraSystem,
-    instances: Vec<Instance>,
-    instance_buffer: wgpu::Buffer,
     depth_texture: texture::Texture,
     obj_model: model::Model,
     light_uniform: LightUniform,
     light_buffer: wgpu::Buffer,
     light_bind_group: wgpu::BindGroup,
     light_render_pipeline: wgpu::RenderPipeline,
+    voxel_render_pipeline: wgpu::RenderPipeline,
+    voxel_texture_bind_group: wgpu::BindGroup,
+    voxel_chunks: Vec<VoxelChunk>,
+    voxel_settings: VoxelSettings,
+    voxel_settings_buffer: wgpu::Buffer,
+    voxel_settings_bind_group: wgpu::BindGroup,
 }
 
 impl State {
@@ -55,14 +59,34 @@ impl State {
                             ty: wgpu::BindingType::Sampler(wgpu::SamplerBindingType::Filtering),
                             count: None,
                         },
+                        wgpu::BindGroupLayoutEntry {
+                            binding: 2,
+                            visibility: wgpu::ShaderStages::FRAGMENT,
+                            ty: wgpu::BindingType::Texture {
+                                multisampled: false,
+                                sample_type: wgpu::TextureSampleType::Float { filterable: true },
+                                view_dimension: wgpu::TextureViewDimension::D2,
+                            },
+                            count: None,
+                        },
+                        wgpu::BindGroupLayoutEntry {
+                            binding: 3,
+                            visibility: wgpu::ShaderStages::FRAGMENT,
+                            ty: wgpu::BindingType::Sampler(wgpu::SamplerBindingType::Filtering),
+                            count: None,
+                        },
                     ],
                     label: Some("texture_bind_group_layout"),
                 });
 
-        let obj_model =
-            resources::load_model("cube.obj", &ctx.device, &ctx.queue, &texture_bind_group_layout)
-                .await
-                .unwrap();
+        let obj_model = resources::load_model(
+            "cube.obj",
+            &ctx.device,
+            &ctx.queue,
+            &texture_bind_group_layout,
+        )
+        .await
+        .unwrap();
 
         let window_background_color = wgpu::Color {
             r: 0.0,
@@ -74,10 +98,8 @@ impl State {
         let camera = CameraSystem::new(&ctx.device, &ctx.config, 0.2);
 
         let light_uniform = LightUniform {
-            position: [2.0, 2.0, 2.0],
-            _padding: 0,
-            color: [1.0, 1.0, 1.0],
-            _padding2: 0,
+            position: glam::vec3(2.0, 2.0, 2.0),
+            color: glam::vec3(1.0, 1.0, 1.0),
         };
 
         // We'll want to update our lights position, so we use COPY_DST
@@ -85,7 +107,7 @@ impl State {
             .device
             .create_buffer_init(&wgpu::util::BufferInitDescriptor {
                 label: Some("Light VB"),
-                contents: bytemuck::cast_slice(&[light_uniform]),
+                contents: &utils::uniform_bytes(&light_uniform),
                 usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
             });
 
@@ -117,29 +139,111 @@ impl State {
         let depth_texture =
             texture::Texture::create_depth_texture(&ctx.device, &ctx.config, "depth_texture");
 
-        let render_pipeline_layout =
+        let voxel_texture = resources::load_texture_array(
+            "array_texture.png",
+            voxel::NUM_TEXTURE_LAYERS,
+            &ctx.device,
+            &ctx.queue,
+        )
+        .await?;
+
+        let voxel_texture_bind_group_layout =
             ctx.device
+                .create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
+                    label: Some("voxel_texture_bind_group_layout"),
+                    entries: &[
+                        wgpu::BindGroupLayoutEntry {
+                            binding: 0,
+                            visibility: wgpu::ShaderStages::FRAGMENT,
+                            ty: wgpu::BindingType::Texture {
+                                multisampled: false,
+                                view_dimension: wgpu::TextureViewDimension::D2Array,
+                                sample_type: wgpu::TextureSampleType::Float { filterable: true },
+                            },
+                            count: None,
+                        },
+                        wgpu::BindGroupLayoutEntry {
+                            binding: 1,
+                            visibility: wgpu::ShaderStages::FRAGMENT,
+                            ty: wgpu::BindingType::Sampler(wgpu::SamplerBindingType::Filtering),
+                            count: None,
+                        },
+                    ],
+                });
+
+        let voxel_texture_bind_group = ctx.device.create_bind_group(&wgpu::BindGroupDescriptor {
+            layout: &voxel_texture_bind_group_layout,
+            entries: &[
+                wgpu::BindGroupEntry {
+                    binding: 0,
+                    resource: wgpu::BindingResource::TextureView(&voxel_texture.view),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 1,
+                    resource: wgpu::BindingResource::Sampler(&voxel_texture.sampler),
+                },
+            ],
+            label: Some("voxel_texture_bind_group"),
+        });
+
+        // Ambient occlusion starts enabled; toggle at runtime with the O key.
+        let voxel_settings = VoxelSettings::new(true);
+        let voxel_settings_buffer =
+            ctx.device
+                .create_buffer_init(&wgpu::util::BufferInitDescriptor {
+                    label: Some("Voxel Settings Buffer"),
+                    contents: &utils::uniform_bytes(&voxel_settings),
+                    usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
+                });
+
+        let voxel_settings_bind_group_layout =
+            ctx.device
+                .create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
+                    label: Some("voxel_settings_bind_group_layout"),
+                    entries: &[wgpu::BindGroupLayoutEntry {
+                        binding: 0,
+                        visibility: wgpu::ShaderStages::FRAGMENT,
+                        ty: wgpu::BindingType::Buffer {
+                            ty: wgpu::BufferBindingType::Uniform,
+                            has_dynamic_offset: false,
+                            min_binding_size: None,
+                        },
+                        count: None,
+                    }],
+                });
+
+        let voxel_settings_bind_group = ctx.device.create_bind_group(&wgpu::BindGroupDescriptor {
+            layout: &voxel_settings_bind_group_layout,
+            entries: &[wgpu::BindGroupEntry {
+                binding: 0,
+                resource: voxel_settings_buffer.as_entire_binding(),
+            }],
+            label: Some("voxel_settings_bind_group"),
+        });
+
+        let voxel_render_pipeline = {
+            let layout = ctx
+                .device
                 .create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
-                    label: Some("Render Pipeline Layout"),
+                    label: Some("Voxel Pipeline Layout"),
                     bind_group_layouts: &[
-                        Some(&texture_bind_group_layout),
+                        Some(&voxel_texture_bind_group_layout),
                         Some(camera.bind_group_layout()),
                         Some(&light_bind_group_layout),
+                        Some(&voxel_settings_bind_group_layout),
                     ],
                     immediate_size: 0,
                 });
-
-        let render_pipeline = {
             let shader = wgpu::ShaderModuleDescriptor {
-                label: Some("Normal Shader"),
-                source: wgpu::ShaderSource::Wgsl(include_str!("shader.wgsl").into()),
+                label: Some("Voxel Shader"),
+                source: wgpu::ShaderSource::Wgsl(include_str!("voxel.wgsl").into()),
             };
             create_render_pipeline(
                 &ctx.device,
-                &render_pipeline_layout,
+                &layout,
                 ctx.config.format,
                 Some(texture::Texture::DEPTH_FORMAT),
-                &[model::ModelVertex::desc(), InstanceRaw::desc()],
+                &[voxel::VoxelVertex::desc()],
                 shader,
             )
         };
@@ -169,51 +273,24 @@ impl State {
             )
         };
 
-        const SPACE_BETWEEN: f32 = 3.0;
-        let instances = (0..NUM_INSTANCES_PER_ROW)
-            .flat_map(|z| {
-                (0..NUM_INSTANCES_PER_ROW).map(move |x| {
-                    let x = SPACE_BETWEEN * (x as f32 - NUM_INSTANCES_PER_ROW as f32 / 2.0);
-                    let z = SPACE_BETWEEN * (z as f32 - NUM_INSTANCES_PER_ROW as f32 / 2.0);
-
-                    let position = cgmath::Vector3 { x, y: 0.0, z };
-
-                    let rotation = if position.is_zero() {
-                        cgmath::Quaternion::from_axis_angle(
-                            cgmath::Vector3::unit_z(),
-                            cgmath::Deg(0.0),
-                        )
-                    } else {
-                        cgmath::Quaternion::from_axis_angle(position.normalize(), cgmath::Deg(45.0))
-                    };
-
-                    Instance { position, rotation }
-                })
-            })
-            .collect::<Vec<_>>();
-
-        let instance_data = instances.iter().map(Instance::to_raw).collect::<Vec<_>>();
-        let instance_buffer = ctx
-            .device
-            .create_buffer_init(&wgpu::util::BufferInitDescriptor {
-                label: Some("Instance Buffer"),
-                contents: bytemuck::cast_slice(&instance_data),
-                usage: wgpu::BufferUsages::VERTEX,
-            });
+        let voxel_chunks = voxel::generate_chunk_grid(&ctx.device, CHUNK_GRID_SIZE);
 
         Ok(Self {
             ctx,
             window_background_color,
-            render_pipeline,
             camera,
-            instances,
-            instance_buffer,
             depth_texture,
             obj_model,
             light_uniform,
             light_buffer,
             light_bind_group,
             light_render_pipeline,
+            voxel_render_pipeline,
+            voxel_texture_bind_group,
+            voxel_chunks,
+            voxel_settings,
+            voxel_settings_buffer,
+            voxel_settings_bind_group,
         })
     }
 
@@ -243,6 +320,14 @@ impl State {
     pub fn handle_key(&mut self, event_loop: &ActiveEventLoop, code: KeyCode, is_pressed: bool) {
         if code == KeyCode::Escape && is_pressed {
             event_loop.exit();
+        } else if code == KeyCode::KeyO && is_pressed {
+            // Toggle ambient occlusion and push the new flag to the GPU.
+            self.voxel_settings.toggle();
+            self.ctx.queue.write_buffer(
+                &self.voxel_settings_buffer,
+                0,
+                &utils::uniform_bytes(&self.voxel_settings),
+            );
         } else {
             self.camera.process_key(code, is_pressed);
         }
@@ -251,16 +336,13 @@ impl State {
     pub fn update(&mut self) {
         self.camera.update(&self.ctx.queue);
 
-        // Update the light
-        let old_position: cgmath::Vector3<_> = self.light_uniform.position.into();
-        self.light_uniform.position =
-            (cgmath::Quaternion::from_axis_angle((0.0, 1.0, 0.0).into(), cgmath::Deg(1.0))
-                * old_position)
-                .into();
+        // Update the light: orbit it 1° around the +y axis each frame.
+        let rotation = Quat::from_axis_angle(Vec3::Y, 1f32.to_radians());
+        self.light_uniform.position = rotation * self.light_uniform.position;
         self.ctx.queue.write_buffer(
             &self.light_buffer,
             0,
-            bytemuck::cast_slice(&[self.light_uniform]),
+            &utils::uniform_bytes(&self.light_uniform),
         );
     }
 
@@ -299,12 +381,12 @@ impl State {
             .texture
             .create_view(&wgpu::TextureViewDescriptor::default());
 
-        let mut encoder =
-            self.ctx
-                .device
-                .create_command_encoder(&wgpu::CommandEncoderDescriptor {
-                    label: Some("Render Encoder"),
-                });
+        let mut encoder = self
+            .ctx
+            .device
+            .create_command_encoder(&wgpu::CommandEncoderDescriptor {
+                label: Some("Render Encoder"),
+            });
 
         {
             let mut render_pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
@@ -332,10 +414,7 @@ impl State {
                 multiview_mask: None,
             });
 
-            // The instance buffer lives in vertex slot 1 and is shared by the
-            // model draw below; the per-mesh draw only sets slot 0.
-            render_pass.set_vertex_buffer(1, self.instance_buffer.slice(..));
-
+            // Draw the orbiting light marker.
             use crate::model::DrawLight;
             render_pass.set_pipeline(&self.light_render_pipeline);
             render_pass.draw_light_model(
@@ -344,14 +423,20 @@ impl State {
                 &self.light_bind_group,
             );
 
-            use crate::model::DrawModel;
-            render_pass.set_pipeline(&self.render_pipeline);
-            render_pass.draw_model_instanced(
-                &self.obj_model,
-                0..self.instances.len() as u32,
-                self.camera.bind_group(),
-                &self.light_bind_group,
-            );
+            // Draw the voxel chunks. The texture array (group 0), camera
+            // (group 1), and light (group 2) are shared across every chunk;
+            // each chunk only swaps its own vertex/index buffers.
+            render_pass.set_pipeline(&self.voxel_render_pipeline);
+            render_pass.set_bind_group(0, &self.voxel_texture_bind_group, &[]);
+            render_pass.set_bind_group(1, self.camera.bind_group(), &[]);
+            render_pass.set_bind_group(2, &self.light_bind_group, &[]);
+            render_pass.set_bind_group(3, &self.voxel_settings_bind_group, &[]);
+            for chunk in &self.voxel_chunks {
+                render_pass.set_vertex_buffer(0, chunk.vertex_buffer.slice(..));
+                render_pass
+                    .set_index_buffer(chunk.index_buffer.slice(..), wgpu::IndexFormat::Uint32);
+                render_pass.draw_indexed(0..chunk.num_indices, 0, 0..1);
+            }
         }
 
         // submit will accept anything that implements IntoIter

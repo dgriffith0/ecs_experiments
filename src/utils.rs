@@ -1,5 +1,19 @@
 use wgpu::Color;
 
+/// Encode a `ShaderType` into a `Vec<u8>` laid out per WGSL's uniform-buffer
+/// (std140) rules. encase enforces the alignment/padding at compile time, so we
+/// no longer hand-roll padding fields or rely on `#[repr(C)]` matching the GPU.
+pub fn uniform_bytes<T>(value: &T) -> Vec<u8>
+where
+    T: encase::ShaderType + encase::internal::WriteInto,
+{
+    let mut buffer = encase::UniformBuffer::new(Vec::<u8>::new());
+    buffer
+        .write(value)
+        .expect("writing into an in-memory Vec buffer is infallible");
+    buffer.into_inner()
+}
+
 pub fn normalize(value: f64, start: f64, stop: f64) -> f64 {
     assert!(start != stop, "cannot normalize over a zero-width range");
     (value - start) / (stop - start)
@@ -71,4 +85,3 @@ mod tests {
         assert!((c.b - 0.375).abs() < EPS);
     }
 }
-
