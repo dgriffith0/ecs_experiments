@@ -6,6 +6,7 @@ mod instance;
 mod light;
 mod model;
 mod resources;
+mod skybox;
 mod state;
 mod texture;
 mod utils;

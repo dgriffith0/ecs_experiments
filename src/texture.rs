@@ -141,6 +141,87 @@ impl Texture {
         })
     }
 
+    /// Build a cubemap from six square face images, in wgpu's cube-layer order:
+    /// `[+X, -X, +Y, -Y, +Z, -Z]`. Every face must share the same square size.
+    /// The view is created with `Cube` dimensionality so shaders can sample it
+    /// as `texture_cube<f32>` by direction vector.
+    pub fn from_cube_images(
+        device: &wgpu::Device,
+        queue: &wgpu::Queue,
+        faces: &[image::DynamicImage; 6],
+        label: Option<&str>,
+    ) -> Result<Self> {
+        let (size_px, _) = faces[0].dimensions();
+        ensure!(
+            faces.iter().all(|f| f.dimensions() == (size_px, size_px)),
+            "all cubemap faces must be the same square size ({size_px}×{size_px})"
+        );
+
+        let size = wgpu::Extent3d {
+            width: size_px,
+            height: size_px,
+            depth_or_array_layers: 6,
+        };
+
+        let texture = device.create_texture(&wgpu::TextureDescriptor {
+            label,
+            size,
+            mip_level_count: 1,
+            sample_count: 1,
+            dimension: wgpu::TextureDimension::D2,
+            format: wgpu::TextureFormat::Rgba8UnormSrgb,
+            usage: wgpu::TextureUsages::TEXTURE_BINDING | wgpu::TextureUsages::COPY_DST,
+            view_formats: &[],
+        });
+
+        for (layer, face) in faces.iter().enumerate() {
+            let rgba = face.to_rgba8();
+            queue.write_texture(
+                wgpu::TexelCopyTextureInfo {
+                    aspect: wgpu::TextureAspect::All,
+                    texture: &texture,
+                    mip_level: 0,
+                    origin: wgpu::Origin3d {
+                        x: 0,
+                        y: 0,
+                        z: layer as u32,
+                    },
+                },
+                &rgba,
+                wgpu::TexelCopyBufferLayout {
+                    offset: 0,
+                    bytes_per_row: Some(4 * size_px),
+                    rows_per_image: Some(size_px),
+                },
+                wgpu::Extent3d {
+                    width: size_px,
+                    height: size_px,
+                    depth_or_array_layers: 1,
+                },
+            );
+        }
+
+        let view = texture.create_view(&wgpu::TextureViewDescriptor {
+            dimension: Some(wgpu::TextureViewDimension::Cube),
+            ..Default::default()
+        });
+        let sampler = device.create_sampler(&wgpu::SamplerDescriptor {
+            address_mode_u: wgpu::AddressMode::ClampToEdge,
+            address_mode_v: wgpu::AddressMode::ClampToEdge,
+            address_mode_w: wgpu::AddressMode::ClampToEdge,
+            mag_filter: wgpu::FilterMode::Linear,
+            min_filter: wgpu::FilterMode::Linear,
+            mipmap_filter: wgpu::MipmapFilterMode::Nearest,
+            ..Default::default()
+        });
+
+        Ok(Self {
+            texture,
+            view,
+            sampler,
+        })
+    }
+
     pub fn from_image(
         device: &wgpu::Device,
         queue: &wgpu::Queue,

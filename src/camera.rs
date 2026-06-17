@@ -160,6 +160,12 @@ impl CameraSystem {
         &self.bind_group
     }
 
+    /// The current combined view-projection matrix (already includes the
+    /// GL→wgpu depth correction and the camera translation).
+    pub fn view_proj(&self) -> Mat4 {
+        self.uniform.view_proj
+    }
+
     pub fn bind_group_layout(&self) -> &wgpu::BindGroupLayout {
         &self.bind_group_layout
     }

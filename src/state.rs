@@ -9,7 +9,7 @@ use crate::gpu::GpuContext;
 use crate::light::LightUniform;
 use crate::model::Vertex;
 use crate::voxel::{self, VoxelChunk, VoxelSettings};
-use crate::{model, resources, texture, utils};
+use crate::{model, resources, skybox, texture, utils};
 
 /// Side length (in chunks) of the flat voxel chunk grid.
 const CHUNK_GRID_SIZE: u32 = 4;
@@ -31,6 +31,7 @@ pub struct State {
     voxel_settings: VoxelSettings,
     voxel_settings_buffer: wgpu::Buffer,
     voxel_settings_bind_group: wgpu::BindGroup,
+    skybox: skybox::Skybox,
 }
 
 impl State {
@@ -275,6 +276,8 @@ impl State {
 
         let voxel_chunks = voxel::generate_chunk_grid(&ctx.device, CHUNK_GRID_SIZE);
 
+        let skybox = skybox::Skybox::new(&ctx.device, &ctx.queue, &ctx.config).await?;
+
         Ok(Self {
             ctx,
             window_background_color,
@@ -291,6 +294,7 @@ impl State {
             voxel_settings,
             voxel_settings_buffer,
             voxel_settings_bind_group,
+            skybox,
         })
     }
 
@@ -335,6 +339,9 @@ impl State {
 
     pub fn update(&mut self) {
         self.camera.update(&self.ctx.queue);
+        // Keep the sky oriented with the camera (it samples by view direction).
+        self.skybox
+            .update(&self.ctx.queue, self.camera.view_proj());
 
         // Update the light: orbit it 1° around the +y axis each frame.
         let rotation = Quat::from_axis_angle(Vec3::Y, 1f32.to_radians());
@@ -437,6 +444,9 @@ impl State {
                     .set_index_buffer(chunk.index_buffer.slice(..), wgpu::IndexFormat::Uint32);
                 render_pass.draw_indexed(0..chunk.num_indices, 0, 0..1);
             }
+
+            // Draw the sky last so it only fills pixels the scene didn't cover.
+            self.skybox.draw(&mut render_pass);
         }
 
         // submit will accept anything that implements IntoIter

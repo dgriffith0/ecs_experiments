@@ -50,6 +50,24 @@ pub async fn load_texture_array(
     texture::Texture::from_image_array(device, queue, &img, layers, Some(file_name))
 }
 
+/// Load six skybox face images into a cubemap texture. `faces` are filenames in
+/// wgpu cube-layer order: `[+X, -X, +Y, -Y, +Z, -Z]`.
+pub async fn load_cubemap(
+    faces: [&str; 6],
+    device: &wgpu::Device,
+    queue: &wgpu::Queue,
+) -> anyhow::Result<texture::Texture> {
+    let mut images = Vec::with_capacity(6);
+    for name in faces {
+        let data = load_binary(name).await?;
+        images.push(image::load_from_memory(&data)?);
+    }
+    let images: [image::DynamicImage; 6] = images
+        .try_into()
+        .map_err(|_| anyhow::anyhow!("expected 6 cubemap faces"))?;
+    texture::Texture::from_cube_images(device, queue, &images, Some("skybox"))
+}
+
 pub async fn load_model(
     file_name: &str,
     device: &wgpu::Device,
