@@ -1,17 +1,10 @@
 // Voxel shader: samples a texture array (one layer per chunk) and applies
 // world-space Blinn-Phong lighting using the per-face geometric normal.
 
-struct Camera {
-    view_pos: vec4<f32>,
-    view_proj: mat4x4<f32>,
-}
+// `Camera` and `Light` are defined in common.wgsl (prepended at build time).
 @group(1) @binding(0)
 var<uniform> camera: Camera;
 
-struct Light {
-    position: vec3<f32>,
-    color: vec3<f32>,
-}
 @group(2) @binding(0)
 var<uniform> light: Light;
 

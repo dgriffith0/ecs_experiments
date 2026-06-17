@@ -237,7 +237,9 @@ impl State {
                 });
             let shader = wgpu::ShaderModuleDescriptor {
                 label: Some("Voxel Shader"),
-                source: wgpu::ShaderSource::Wgsl(include_str!("voxel.wgsl").into()),
+                source: wgpu::ShaderSource::Wgsl(
+                    concat!(include_str!("common.wgsl"), include_str!("voxel.wgsl")).into(),
+                ),
             };
             create_render_pipeline(
                 &ctx.device,
@@ -262,7 +264,9 @@ impl State {
                 });
             let shader = wgpu::ShaderModuleDescriptor {
                 label: Some("Light Shader"),
-                source: wgpu::ShaderSource::Wgsl(include_str!("light.wgsl").into()),
+                source: wgpu::ShaderSource::Wgsl(
+                    concat!(include_str!("common.wgsl"), include_str!("light.wgsl")).into(),
+                ),
             };
             create_render_pipeline(
                 &ctx.device,
