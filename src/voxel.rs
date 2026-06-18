@@ -13,7 +13,7 @@
 
 use block_mesh::ndshape::{ConstShape, ConstShape3u32};
 use block_mesh::{
-    RIGHT_HANDED_Y_UP_CONFIG, UnitQuadBuffer, Voxel, VoxelVisibility, visible_block_faces,
+    visible_block_faces, UnitQuadBuffer, Voxel, VoxelVisibility, RIGHT_HANDED_Y_UP_CONFIG,
 };
 use encase::ShaderType;
 use glam::{IVec3, UVec2, Vec3};
@@ -183,6 +183,7 @@ pub fn generate_chunk(
     device: &wgpu::Device,
     world_origin: Vec3,
     chunk_voxel_offset: UVec2,
+    grid_voxel_extent: u32,
     noise: &Fbm<Perlin>,
 ) -> VoxelChunk {
     // Fill the padded volume from the global height map. We sample every column
@@ -197,6 +198,15 @@ pub fn generate_chunk(
             // Global voxel coords of this column; `-1` removes the padding offset.
             let gx = chunk_voxel_offset.x as i64 + x as i64 - 1;
             let gz = chunk_voxel_offset.y as i64 + z as i64 - 1;
+            // Padding columns beyond the rendered grid have no real neighbour
+            // chunk. Leaving them empty makes block-mesh emit the terrain's
+            // outer boundary walls instead of culling them against the infinite
+            // height map. Interior seams still mirror their neighbour (their
+            // padding maps to an in-range column) and stay culled.
+            let extent = grid_voxel_extent as i64;
+            if gx < 0 || gz < 0 || gx >= extent || gz >= extent {
+                continue;
+            }
             let n = noise.get([gx as f64 * NOISE_SCALE, gz as f64 * NOISE_SCALE]); // -1..1
             let t = ((n + 1.0) * 0.5).clamp(0.0, 1.0); // 0..1
             let height =
@@ -321,6 +331,7 @@ pub fn generate_chunk_grid(device: &wgpu::Device, grid: u32) -> Vec<VoxelChunk> 
     let half = (grid as f32 - 1.0) * spacing / 2.0;
     let chunk_extent = CHUNK as f32 * VOXEL_SIZE;
 
+    let grid_voxel_extent = grid * CHUNK;
     let mut chunks = Vec::with_capacity((grid * grid) as usize);
     for cz in 0..grid {
         for cx in 0..grid {
@@ -332,7 +343,13 @@ pub fn generate_chunk_grid(device: &wgpu::Device, grid: u32) -> Vec<VoxelChunk> 
                 cz as f32 * spacing - half - 6.0,
             );
             let chunk_voxel_offset = UVec2::new(cx * CHUNK, cz * CHUNK);
-            chunks.push(generate_chunk(device, origin, chunk_voxel_offset, &noise));
+            chunks.push(generate_chunk(
+                device,
+                origin,
+                chunk_voxel_offset,
+                grid_voxel_extent,
+                &noise,
+            ));
         }
     }
     chunks

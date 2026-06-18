@@ -2,7 +2,6 @@ mod app;
 mod camera;
 mod camera_controller;
 mod gpu;
-mod instance;
 mod light;
 mod model;
 mod resources;

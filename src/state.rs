@@ -38,56 +38,9 @@ impl State {
     pub async fn new(window: Arc<Window>) -> anyhow::Result<Self> {
         let ctx = GpuContext::new(window).await?;
 
-        let texture_bind_group_layout =
-            ctx.device
-                .create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
-                    entries: &[
-                        wgpu::BindGroupLayoutEntry {
-                            binding: 0,
-                            visibility: wgpu::ShaderStages::FRAGMENT,
-                            ty: wgpu::BindingType::Texture {
-                                multisampled: false,
-                                view_dimension: wgpu::TextureViewDimension::D2,
-                                sample_type: wgpu::TextureSampleType::Float { filterable: true },
-                            },
-                            count: None,
-                        },
-                        wgpu::BindGroupLayoutEntry {
-                            binding: 1,
-                            visibility: wgpu::ShaderStages::FRAGMENT,
-                            // This should match the filterable field of the
-                            // corresponding Texture entry above.
-                            ty: wgpu::BindingType::Sampler(wgpu::SamplerBindingType::Filtering),
-                            count: None,
-                        },
-                        wgpu::BindGroupLayoutEntry {
-                            binding: 2,
-                            visibility: wgpu::ShaderStages::FRAGMENT,
-                            ty: wgpu::BindingType::Texture {
-                                multisampled: false,
-                                sample_type: wgpu::TextureSampleType::Float { filterable: true },
-                                view_dimension: wgpu::TextureViewDimension::D2,
-                            },
-                            count: None,
-                        },
-                        wgpu::BindGroupLayoutEntry {
-                            binding: 3,
-                            visibility: wgpu::ShaderStages::FRAGMENT,
-                            ty: wgpu::BindingType::Sampler(wgpu::SamplerBindingType::Filtering),
-                            count: None,
-                        },
-                    ],
-                    label: Some("texture_bind_group_layout"),
-                });
-
-        let obj_model = resources::load_model(
-            "cube.obj",
-            &ctx.device,
-            &ctx.queue,
-            &texture_bind_group_layout,
-        )
-        .await
-        .unwrap();
+        let obj_model = resources::load_model("cube.obj", &ctx.device)
+            .await
+            .unwrap();
 
         let window_background_color = wgpu::Color {
             r: 0.0,
