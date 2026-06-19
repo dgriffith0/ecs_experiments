@@ -1,6 +1,7 @@
 mod app;
 mod camera;
 mod camera_controller;
+mod gltf_model;
 mod gpu;
 mod light;
 mod model;

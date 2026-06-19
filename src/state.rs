@@ -1,6 +1,6 @@
 use std::sync::Arc;
 
-use glam::{Quat, Vec3};
+use glam::{Mat4, Quat, Vec3};
 use wgpu::util::DeviceExt;
 use winit::{event_loop::ActiveEventLoop, keyboard::KeyCode, window::Window};
 
@@ -9,7 +9,7 @@ use crate::gpu::GpuContext;
 use crate::light::LightUniform;
 use crate::model::Vertex;
 use crate::voxel::{self, VoxelChunk, VoxelSettings};
-use crate::{model, resources, skybox, texture, utils};
+use crate::{gltf_model, model, resources, skybox, texture, utils};
 
 /// Side length (in chunks) of the flat voxel chunk grid.
 const CHUNK_GRID_SIZE: u32 = 4;
@@ -32,6 +32,8 @@ pub struct State {
     voxel_settings_buffer: wgpu::Buffer,
     voxel_settings_bind_group: wgpu::BindGroup,
     skybox: skybox::Skybox,
+    gltf_render_pipeline: wgpu::RenderPipeline,
+    gltf_models: Vec<gltf_model::GltfModel>,
 }
 
 impl State {
@@ -231,6 +233,92 @@ impl State {
             )
         };
 
+        // --- glTF models: one shared pipeline, one GltfModel per file ---
+        let gltf_texture_bind_group_layout =
+            ctx.device
+                .create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
+                    label: Some("gltf_texture_bind_group_layout"),
+                    entries: &[
+                        wgpu::BindGroupLayoutEntry {
+                            binding: 0,
+                            visibility: wgpu::ShaderStages::FRAGMENT,
+                            ty: wgpu::BindingType::Texture {
+                                multisampled: false,
+                                view_dimension: wgpu::TextureViewDimension::D2,
+                                sample_type: wgpu::TextureSampleType::Float { filterable: true },
+                            },
+                            count: None,
+                        },
+                        wgpu::BindGroupLayoutEntry {
+                            binding: 1,
+                            visibility: wgpu::ShaderStages::FRAGMENT,
+                            ty: wgpu::BindingType::Sampler(wgpu::SamplerBindingType::Filtering),
+                            count: None,
+                        },
+                    ],
+                });
+
+        let gltf_model_bind_group_layout =
+            ctx.device
+                .create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
+                    label: Some("gltf_model_bind_group_layout"),
+                    entries: &[wgpu::BindGroupLayoutEntry {
+                        binding: 0,
+                        visibility: wgpu::ShaderStages::VERTEX,
+                        ty: wgpu::BindingType::Buffer {
+                            ty: wgpu::BufferBindingType::Uniform,
+                            has_dynamic_offset: false,
+                            min_binding_size: None,
+                        },
+                        count: None,
+                    }],
+                });
+
+        let gltf_render_pipeline = {
+            let layout = ctx
+                .device
+                .create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
+                    label: Some("glTF Pipeline Layout"),
+                    bind_group_layouts: &[
+                        Some(&gltf_texture_bind_group_layout),
+                        Some(camera.bind_group_layout()),
+                        Some(&light_bind_group_layout),
+                        Some(&gltf_model_bind_group_layout),
+                    ],
+                    immediate_size: 0,
+                });
+            let shader = wgpu::ShaderModuleDescriptor {
+                label: Some("glTF Shader"),
+                source: wgpu::ShaderSource::Wgsl(
+                    concat!(include_str!("common.wgsl"), include_str!("gltf.wgsl")).into(),
+                ),
+            };
+            create_render_pipeline(
+                &ctx.device,
+                &layout,
+                ctx.config.format,
+                Some(texture::Texture::DEPTH_FORMAT),
+                &[gltf_model::GltfVertex::desc()],
+                shader,
+            )
+        };
+
+        // Load each glTF model with its world transform (translation * scale).
+        // Add more entries here to place additional models in the scene; the
+        // fox's native bind pose is ~150 units long, hence the 0.03 scale.
+        let gltf_models = vec![
+            resources::load_glb(
+                "fox.glb",
+                &ctx.device,
+                &ctx.queue,
+                Mat4::from_translation(Vec3::new(0.0, -0.5, -5.0))
+                    * Mat4::from_scale(Vec3::splat(0.03)),
+                &gltf_texture_bind_group_layout,
+                &gltf_model_bind_group_layout,
+            )
+            .await?,
+        ];
+
         let voxel_chunks = voxel::generate_chunk_grid(&ctx.device, CHUNK_GRID_SIZE);
 
         let skybox = skybox::Skybox::new(&ctx.device, &ctx.queue, &ctx.config).await?;
@@ -252,6 +340,8 @@ impl State {
             voxel_settings_buffer,
             voxel_settings_bind_group,
             skybox,
+            gltf_render_pipeline,
+            gltf_models,
         })
     }
 
@@ -313,7 +403,18 @@ impl State {
     pub fn render(&mut self) -> anyhow::Result<()> {
         self.ctx.window.request_redraw();
 
-        // We can't render unless the surface is configured
+        // Configure the surface lazily once a real size is available. Some
+        // platforms (macOS with `with_maximized(true)`) report a 0×0 size at
+        // window creation and never send an initial `Resized`, so we'd otherwise
+        // never configure and nothing would draw until a manual resize.
+        if !self.ctx.is_surface_configured {
+            let size = self.ctx.window.inner_size();
+            if size.width > 0 && size.height > 0 {
+                self.resize(size.width, size.height);
+            }
+        }
+
+        // Still nothing to render into until the surface is configured.
         if !self.ctx.is_surface_configured {
             return Ok(());
         }
@@ -400,6 +501,19 @@ impl State {
                 render_pass
                     .set_index_buffer(chunk.index_buffer.slice(..), wgpu::IndexFormat::Uint32);
                 render_pass.draw_indexed(0..chunk.num_indices, 0, 0..1);
+            }
+
+            // Draw the glTF models. Camera (group 1) and light (group 2) are
+            // shared; each model swaps its texture (0), transform (3), and buffers.
+            render_pass.set_pipeline(&self.gltf_render_pipeline);
+            render_pass.set_bind_group(1, self.camera.bind_group(), &[]);
+            render_pass.set_bind_group(2, &self.light_bind_group, &[]);
+            for m in &self.gltf_models {
+                render_pass.set_bind_group(0, &m.texture_bind_group, &[]);
+                render_pass.set_bind_group(3, &m.model_bind_group, &[]);
+                render_pass.set_vertex_buffer(0, m.vertex_buffer.slice(..));
+                render_pass.set_index_buffer(m.index_buffer.slice(..), wgpu::IndexFormat::Uint32);
+                render_pass.draw_indexed(0..m.num_indices, 0, 0..1);
             }
 
             // Draw the sky last so it only fills pixels the scene didn't cover.

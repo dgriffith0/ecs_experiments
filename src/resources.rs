@@ -2,7 +2,8 @@ use std::io::Cursor;
 
 use wgpu::util::DeviceExt;
 
-use crate::{model, texture};
+use crate::gltf_model::{GltfModel, GltfVertex};
+use crate::{model, texture, utils};
 
 pub async fn load_string(file_name: &str) -> anyhow::Result<String> {
     let txt = {
@@ -114,4 +115,118 @@ pub async fn load_model(
         .collect::<Vec<_>>();
 
     Ok(model::Model { meshes })
+}
+
+/// Load a binary glTF (`.glb`) as a single static, textured mesh. We read the
+/// first mesh's first primitive (positions + UVs + indices) in its bind pose and
+/// decode the material's base-color image to an RGBA texture. Normals, skinning,
+/// and animation are ignored — `fox.wgsl` derives flat normals in the shader.
+pub async fn load_glb(
+    file_name: &str,
+    device: &wgpu::Device,
+    queue: &wgpu::Queue,
+    transform: glam::Mat4,
+    texture_layout: &wgpu::BindGroupLayout,
+    model_layout: &wgpu::BindGroupLayout,
+) -> anyhow::Result<GltfModel> {
+    let bytes = load_binary(file_name).await?;
+    let (document, buffers, images) = gltf::import_slice(&bytes)?;
+
+    let mesh = document
+        .meshes()
+        .next()
+        .ok_or_else(|| anyhow::anyhow!("{file_name}: no meshes"))?;
+    let primitive = mesh
+        .primitives()
+        .next()
+        .ok_or_else(|| anyhow::anyhow!("{file_name}: mesh has no primitives"))?;
+
+    let reader = primitive.reader(|b| Some(buffers[b.index()].0.as_slice()));
+    let positions = reader
+        .read_positions()
+        .ok_or_else(|| anyhow::anyhow!("{file_name}: primitive has no positions"))?;
+    let mut tex_coords = reader
+        .read_tex_coords(0)
+        .ok_or_else(|| anyhow::anyhow!("{file_name}: primitive has no tex coords"))?
+        .into_f32();
+    let vertices: Vec<GltfVertex> = positions
+        .map(|position| GltfVertex {
+            position,
+            tex_coords: tex_coords.next().unwrap_or([0.0, 0.0]),
+        })
+        .collect();
+    // Some primitives (the Fox sample included) are non-indexed flat triangle
+    // lists; synthesize a sequential index buffer so the draw path is uniform.
+    let indices: Vec<u32> = match reader.read_indices() {
+        Some(read) => read.into_u32().collect(),
+        None => (0..vertices.len() as u32).collect(),
+    };
+
+    let vertex_buffer = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
+        label: Some(&format!("{file_name} Vertex Buffer")),
+        contents: bytemuck::cast_slice(&vertices),
+        usage: wgpu::BufferUsages::VERTEX,
+    });
+    let index_buffer = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
+        label: Some(&format!("{file_name} Index Buffer")),
+        contents: bytemuck::cast_slice(&indices),
+        usage: wgpu::BufferUsages::INDEX,
+    });
+
+    // Decode the base-color texture to RGBA8 (the Fox's image is RGB PNG).
+    let base_color = primitive
+        .material()
+        .pbr_metallic_roughness()
+        .base_color_texture()
+        .ok_or_else(|| anyhow::anyhow!("{file_name}: material has no base color texture"))?;
+    let image = &images[base_color.texture().source().index()];
+    let rgba: Vec<u8> = match image.format {
+        gltf::image::Format::R8G8B8A8 => image.pixels.clone(),
+        gltf::image::Format::R8G8B8 => image
+            .pixels
+            .chunks_exact(3)
+            .flat_map(|c| [c[0], c[1], c[2], 255])
+            .collect(),
+        other => anyhow::bail!("{file_name}: unsupported base-color image format {other:?}"),
+    };
+    let texture =
+        texture::Texture::from_rgba8(device, queue, image.width, image.height, &rgba, Some(file_name))?;
+
+    let texture_bind_group = device.create_bind_group(&wgpu::BindGroupDescriptor {
+        layout: texture_layout,
+        entries: &[
+            wgpu::BindGroupEntry {
+                binding: 0,
+                resource: wgpu::BindingResource::TextureView(&texture.view),
+            },
+            wgpu::BindGroupEntry {
+                binding: 1,
+                resource: wgpu::BindingResource::Sampler(&texture.sampler),
+            },
+        ],
+        label: Some("gltf_texture_bind_group"),
+    });
+
+    // Per-model transform uniform (group 3).
+    let model_buffer = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
+        label: Some(&format!("{file_name} Model Buffer")),
+        contents: &utils::uniform_bytes(&transform),
+        usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
+    });
+    let model_bind_group = device.create_bind_group(&wgpu::BindGroupDescriptor {
+        layout: model_layout,
+        entries: &[wgpu::BindGroupEntry {
+            binding: 0,
+            resource: model_buffer.as_entire_binding(),
+        }],
+        label: Some("gltf_model_bind_group"),
+    });
+
+    Ok(GltfModel {
+        vertex_buffer,
+        index_buffer,
+        num_indices: indices.len() as u32,
+        texture_bind_group,
+        model_bind_group,
+    })
 }

@@ -29,11 +29,16 @@ impl Default for App {
 
 impl ApplicationHandler<State> for App {
     fn resumed(&mut self, event_loop: &ActiveEventLoop) {
-        let window_attributes = Window::default_attributes();
+        let window_attributes = Window::default_attributes().with_maximized(true);
 
         let window = Arc::new(event_loop.create_window(window_attributes).unwrap());
 
-        self.state = Some(pollster::block_on(State::new(window)).unwrap());
+        let state = pollster::block_on(State::new(window)).unwrap();
+        // Kick off the first frame. Auto-maximized windows on macOS don't get an
+        // initial `RedrawRequested`, so without this the render loop (which
+        // re-arms itself each frame via `request_redraw`) never starts.
+        state.window().request_redraw();
+        self.state = Some(state);
     }
 
     fn user_event(&mut self, _event_loop: &ActiveEventLoop, event: State) {
