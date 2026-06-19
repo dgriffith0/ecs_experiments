@@ -125,7 +125,6 @@ pub async fn load_glb(
     file_name: &str,
     device: &wgpu::Device,
     queue: &wgpu::Queue,
-    transform: glam::Mat4,
     texture_layout: &wgpu::BindGroupLayout,
     model_layout: &wgpu::BindGroupLayout,
 ) -> anyhow::Result<GltfModel> {
@@ -207,10 +206,11 @@ pub async fn load_glb(
         label: Some("gltf_texture_bind_group"),
     });
 
-    // Per-model transform uniform (group 3).
+    // Per-model transform uniform (group 3), written each frame from the
+    // entity's `Transform` by `upload_model_transforms` — init to identity.
     let model_buffer = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
         label: Some(&format!("{file_name} Model Buffer")),
-        contents: &utils::uniform_bytes(&transform),
+        contents: &utils::uniform_bytes(&glam::Mat4::IDENTITY),
         usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
     });
     let model_bind_group = device.create_bind_group(&wgpu::BindGroupDescriptor {
@@ -228,5 +228,6 @@ pub async fn load_glb(
         num_indices: indices.len() as u32,
         texture_bind_group,
         model_bind_group,
+        model_buffer,
     })
 }

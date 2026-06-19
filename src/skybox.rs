@@ -10,7 +10,7 @@ use encase::ShaderType;
 use glam::Mat4;
 use wgpu::util::DeviceExt;
 
-use crate::{resources, texture, utils};
+use crate::{assets, texture, utils};
 
 /// Uniform mirrored by `skybox.wgsl`: the inverse of the camera's full
 /// view-projection, used to unproject clip-space pixels back into world rays.
@@ -33,7 +33,7 @@ impl Skybox {
         config: &wgpu::SurfaceConfiguration,
     ) -> anyhow::Result<Self> {
         // Faces in wgpu cube-layer order: +X, -X, +Y, -Y, +Z, -Z.
-        let cubemap = resources::load_cubemap(
+        let cubemap = assets::load_cubemap(
             [
                 "skybox/right.png",
                 "skybox/left.png",

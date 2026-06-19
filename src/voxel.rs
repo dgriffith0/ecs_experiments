@@ -125,7 +125,8 @@ impl VoxelVertex {
     }
 }
 
-/// GPU buffers for one meshed chunk.
+/// GPU buffers for one meshed chunk. One ECS entity per chunk.
+#[derive(bevy_ecs::prelude::Component)]
 pub struct VoxelChunk {
     pub vertex_buffer: wgpu::Buffer,
     pub index_buffer: wgpu::Buffer,

@@ -1,13 +1,12 @@
 mod app;
+mod assets;
 mod camera;
-mod camera_controller;
+mod ecs;
 mod gltf_model;
-mod gpu;
 mod light;
 mod model;
-mod resources;
+mod render;
 mod skybox;
-mod state;
 mod texture;
 mod utils;
 mod voxel;

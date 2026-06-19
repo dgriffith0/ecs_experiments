@@ -28,13 +28,17 @@ impl GltfVertex {
 
 /// One loaded glTF model: its geometry, base-color texture, and world transform.
 /// Many of these share a single pipeline; each carries its own bind groups so
-/// they can be drawn in a loop.
+/// they can be drawn in a loop. One ECS entity per model.
+#[derive(bevy_ecs::prelude::Component)]
 pub struct GltfModel {
     pub vertex_buffer: wgpu::Buffer,
     pub index_buffer: wgpu::Buffer,
     pub num_indices: u32,
     /// Texture + sampler bound at `@group(0)` in `gltf.wgsl`.
     pub texture_bind_group: wgpu::BindGroup,
-    /// Per-model transform matrix uniform bound at `@group(3)`.
+    /// Per-model transform matrix uniform bound at `@group(3)`. Driven each frame
+    /// from the entity's `Transform` by `upload_model_transforms`.
     pub model_bind_group: wgpu::BindGroup,
+    /// The buffer behind `model_bind_group`, written from the entity's transform.
+    pub model_buffer: wgpu::Buffer,
 }

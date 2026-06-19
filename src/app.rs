@@ -1,23 +1,33 @@
 use std::sync::Arc;
 
+use bevy_ecs::prelude::{Schedule, World};
 use winit::{
     application::ApplicationHandler,
     event::*,
     event_loop::{ActiveEventLoop, EventLoop},
-    keyboard::PhysicalKey,
+    keyboard::{KeyCode, PhysicalKey},
     window::Window,
 };
 
-use crate::state::State;
+use crate::ecs::resources::{BackgroundColor, Input, VoxelSettingsRes};
+use crate::ecs::setup::{build_schedule, build_world};
+use crate::render::context::RenderContext;
+use crate::render::draw::resize;
 use crate::utils::ColorFromXY;
 
+/// The winit runner. Owns the ECS `World` and the per-frame `Schedule`, and
+/// translates window events into resource/world mutations.
 pub struct App {
-    state: Option<State>,
+    world: Option<World>,
+    schedule: Schedule,
 }
 
 impl App {
     pub fn new() -> Self {
-        Self { state: None }
+        Self {
+            world: None,
+            schedule: build_schedule(),
+        }
     }
 }
 
@@ -27,22 +37,19 @@ impl Default for App {
     }
 }
 
-impl ApplicationHandler<State> for App {
+impl ApplicationHandler for App {
     fn resumed(&mut self, event_loop: &ActiveEventLoop) {
-        let window_attributes = Window::default_attributes().with_maximized(true);
+        let attrs = Window::default_attributes().with_maximized(true);
+        let window = Arc::new(event_loop.create_window(attrs).unwrap());
 
-        let window = Arc::new(event_loop.create_window(window_attributes).unwrap());
-
-        let state = pollster::block_on(State::new(window)).unwrap();
-        // Kick off the first frame. Auto-maximized windows on macOS don't get an
-        // initial `RedrawRequested`, so without this the render loop (which
-        // re-arms itself each frame via `request_redraw`) never starts.
-        state.window().request_redraw();
-        self.state = Some(state);
-    }
-
-    fn user_event(&mut self, _event_loop: &ActiveEventLoop, event: State) {
-        self.state = Some(event);
+        let world = pollster::block_on(build_world(window)).unwrap();
+        // Kick off the first frame; the render system re-arms the redraw each
+        // frame. Auto-maximized macOS windows get no initial RedrawRequested.
+        world
+            .non_send_resource::<RenderContext>()
+            .window
+            .request_redraw();
+        self.world = Some(world);
     }
 
     fn window_event(
@@ -51,60 +58,57 @@ impl ApplicationHandler<State> for App {
         _window_id: winit::window::WindowId,
         event: WindowEvent,
     ) {
-        let state = match &mut self.state {
-            Some(canvas) => canvas,
-            None => return,
+        let Some(world) = self.world.as_mut() else {
+            return;
         };
 
         match event {
             WindowEvent::CloseRequested => event_loop.exit(),
-            WindowEvent::Resized(size) => state.resize(size.width, size.height),
-            WindowEvent::RedrawRequested => {
-                state.update();
-                match state.render() {
-                    Ok(_) => {}
-                    Err(e) => {
-                        // Log the error and exit gracefully
-                        log::error!("{e}");
-                        event_loop.exit();
-                    }
-                }
-            }
-            WindowEvent::CursorMoved {
-                device_id: _,
-                position: p,
-            } => {
-                let size = state.window().inner_size();
-
-                state.set_background_color(wgpu::Color::from_xy(
-                    p.x,
-                    (0.0, size.width.into()),
-                    p.y,
-                    (0.0, size.height.into()),
-                ));
+            WindowEvent::Resized(size) => resize(world, size.width, size.height),
+            WindowEvent::RedrawRequested => self.schedule.run(world),
+            WindowEvent::CursorMoved { position, .. } => {
+                let size = world
+                    .non_send_resource::<RenderContext>()
+                    .window
+                    .inner_size();
+                world.resource_mut::<BackgroundColor>().0 = wgpu::Color::from_xy(
+                    position.x,
+                    (0.0, size.width as f64),
+                    position.y,
+                    (0.0, size.height as f64),
+                );
             }
             WindowEvent::KeyboardInput {
                 event:
                     KeyEvent {
                         physical_key: PhysicalKey::Code(code),
-                        state: key_state,
+                        state,
                         ..
                     },
                 ..
-            } => state.handle_key(event_loop, code, key_state.is_pressed()),
+            } => handle_key(world, event_loop, code, state.is_pressed()),
             _ => {}
         }
+    }
+}
+
+fn handle_key(world: &mut World, event_loop: &ActiveEventLoop, code: KeyCode, pressed: bool) {
+    if code == KeyCode::Escape && pressed {
+        event_loop.exit();
+    } else if code == KeyCode::KeyO && pressed {
+        // Toggle ambient occlusion; `upload_voxel_settings` re-uploads on change.
+        world.resource_mut::<VoxelSettingsRes>().0.toggle();
+    } else {
+        world.resource_mut::<Input>().set(code, pressed);
     }
 }
 
 pub fn run() -> anyhow::Result<()> {
     env_logger::init();
 
-    let event_loop = EventLoop::with_user_event().build()?;
-    {
-        let mut app = App::new();
-        event_loop.run_app(&mut app)?;
-    }
+    let event_loop = EventLoop::new()?;
+    let mut app = App::new();
+    event_loop.run_app(&mut app)?;
 
     Ok(())
 }
