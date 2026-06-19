@@ -17,7 +17,7 @@ use block_mesh::{
 };
 use encase::ShaderType;
 use glam::{IVec3, UVec2, Vec3};
-use noise::{Fbm, MultiFractal, NoiseFn, Perlin};
+use noise::{Curve, Fbm, MultiFractal, NoiseFn, Perlin};
 use wgpu::util::DeviceExt;
 
 /// Number of texture layers in the array texture.
@@ -49,6 +49,12 @@ pub struct TerrainParams {
     pub max_height: u32,
     /// Chunks per side; clamped to `[1, MAX_GRID]`.
     pub grid_size: u32,
+    /// Height-curve shaping (`0..1`). Higher widens the low, flat plains.
+    pub flatness: f64,
+    /// Height-curve shaping (`0..1`). Higher makes the high end steeper/peakier.
+    pub peakiness: f64,
+    /// Probabilistic block-layer dithering width (`0` = hard strata lines).
+    pub layer_blend: f64,
 }
 
 impl Default for TerrainParams {
@@ -62,6 +68,9 @@ impl Default for TerrainParams {
             persistence: 0.5,
             max_height: 24,
             grid_size: 4,
+            flatness: 0.6,
+            peakiness: 0.6,
+            layer_blend: 0.12,
         }
     }
 }
@@ -74,6 +83,9 @@ impl TerrainParams {
             octaves: self.octaves.clamp(1, 32),
             max_height: self.max_height.clamp(MIN_TERRAIN_HEIGHT + 1, CHUNK),
             grid_size: self.grid_size.clamp(1, MAX_GRID),
+            flatness: self.flatness.clamp(0.0, 1.0),
+            peakiness: self.peakiness.clamp(0.0, 1.0),
+            layer_blend: self.layer_blend.clamp(0.0, 0.35),
             ..*self
         }
     }
@@ -91,11 +103,46 @@ fn grid_half(grid: u32) -> f32 {
     (grid as f32 - 1.0) * CHUNK as f32 * VOXEL_SIZE / 2.0
 }
 
+fn lerp(a: f64, b: f64, t: f64) -> f64 {
+    a + (b - a) * t
+}
+
+/// Build the shaped height field: a base Fbm run through a `Curve` whose control
+/// points form a flat-plains → hills → peaks spline, driven by `flatness`
+/// (how far the flat low plateau extends) and `peakiness` (how steep the top
+/// ramp into peaks is). Sampling it yields `t ∈ [0, 1]` mapped to column height.
+fn shaped_noise(params: &TerrainParams) -> Curve<f64, Fbm<Perlin>, 2> {
+    let fbm = Fbm::<Perlin>::new(params.seed)
+        .set_octaves(params.octaves)
+        .set_lacunarity(params.lacunarity)
+        .set_persistence(params.persistence);
+
+    // Control points live in the Fbm's *output* domain, which clusters near 0
+    // (rarely past ±0.6), so the knee sits low. Higher flatness pushes the flat
+    // plateau wider/lower; higher peakiness steepens the climb into the peaks.
+    let flat_knee = lerp(-0.30, 0.15, params.flatness);
+    let flat_out = lerp(0.18, 0.04, params.flatness);
+    let hill_in = lerp(flat_knee, 0.6, 0.5);
+    let hill_out = lerp(0.52, 0.34, params.peakiness);
+    let peak_out = lerp(0.80, 1.0, params.peakiness);
+    // Output is a [0, 1] height factor.
+    Curve::new(fbm)
+        .add_control_point(-1.0, 0.0)
+        .add_control_point(flat_knee, flat_out)
+        .add_control_point(hill_in, hill_out)
+        .add_control_point(1.0, peak_out)
+}
+
 /// Solid-voxel height of the global terrain column at voxel coords `(gx, gz)`.
-/// Shared by chunk generation and surface queries so they always agree.
-fn column_height(noise: &Fbm<Perlin>, gx: i64, gz: i64, params: &TerrainParams) -> u32 {
-    let n = noise.get([gx as f64 * params.frequency, gz as f64 * params.frequency]); // -1..1
-    let t = ((n + 1.0) * 0.5).clamp(0.0, 1.0); // 0..1
+fn column_height(
+    noise: &Curve<f64, Fbm<Perlin>, 2>,
+    gx: i64,
+    gz: i64,
+    params: &TerrainParams,
+) -> u32 {
+    let t = noise
+        .get([gx as f64 * params.frequency, gz as f64 * params.frequency])
+        .clamp(0.0, 1.0);
     MIN_TERRAIN_HEIGHT + (t * (params.max_height - MIN_TERRAIN_HEIGHT) as f64) as u32
 }
 
@@ -108,8 +155,9 @@ pub struct Heightmap {
     grid: u32,
     /// Columns per side (`grid * CHUNK`).
     extent: u32,
-    /// Tallest column these heights were built with (for texture banding).
-    max_height: u32,
+    /// The sanitized parameters these heights were built with (max height for
+    /// texture banding, seed + blend for the probabilistic layers).
+    params: TerrainParams,
     /// Column heights, row-major: `heights[gz * extent + gx]`.
     heights: Vec<u32>,
 }
@@ -118,10 +166,7 @@ impl Heightmap {
     /// Sample the noise once for every column, per the given parameters.
     pub fn generate(params: &TerrainParams) -> Self {
         let p = params.sanitized();
-        let noise = Fbm::<Perlin>::new(p.seed)
-            .set_octaves(p.octaves)
-            .set_lacunarity(p.lacunarity)
-            .set_persistence(p.persistence);
+        let noise = shaped_noise(&p);
         let grid = p.grid_size;
         let extent = grid * CHUNK;
         let heights = (0..extent * extent)
@@ -130,7 +175,7 @@ impl Heightmap {
         Self {
             grid,
             extent,
-            max_height: p.max_height,
+            params: p,
             heights,
         }
     }
@@ -331,19 +376,61 @@ fn quad_indices(start: u32, ccw: bool, flip: bool) -> [u32; 6] {
     }
 }
 
-/// Pick a texture-array layer from a voxel's absolute height. Banding the layers
-/// by elevation gives the terrain clean horizontal strata.
-fn layer_for_height(y: u32, max_height: u32) -> u32 {
-    let f = y as f32 / max_height as f32;
-    if f < 0.25 {
-        2 // water
-    } else if f < 0.50 {
-        0 // grass
-    } else if f < 0.75 {
-        1 // dirt
-    } else {
-        3 // stone
+/// Texture-array layers in ascending-elevation order, with the normalized height
+/// each one is centred on: water → grass → dirt → stone.
+const LAYER_BANDS: [(u32, f32); 4] = [(2, 0.12), (0, 0.38), (1, 0.63), (3, 0.88)];
+
+/// Deterministic per-voxel value in `[0, 1)` from its global coords + seed. A hash
+/// (not RNG) so a given world is reproducible and dithers differently per seed.
+fn hash01(gx: i64, gy: i64, gz: i64, seed: u32) -> f32 {
+    let mut h = seed as u64 ^ 0x9E3779B97F4A7C15;
+    for v in [gx as u64, gy as u64, gz as u64] {
+        h ^= v.wrapping_mul(0xD1B54A32D192ED03);
+        h = h.wrapping_mul(0xCA4BCAA75EC3F625);
+        h ^= h >> 29;
     }
+    ((h >> 40) as f32) / ((1u64 << 24) as f32)
+}
+
+/// Probabilistically pick a texture layer for a voxel from its elevation. Each
+/// layer's weight is a triangular falloff (width `layer_blend`) around its band
+/// centre, so near a boundary the two layers interleave into a dithered blend
+/// instead of a hard line. `layer_blend == 0` collapses to nearest-band strata.
+fn layer_at(gx: i64, gy: i64, gz: i64, params: &TerrainParams) -> u32 {
+    let f = (gy as f32 / params.max_height as f32).clamp(0.0, 1.0);
+    let blend = params.layer_blend as f32;
+
+    let mut weights = [0.0f32; 4];
+    let mut total = 0.0;
+    for (k, (_, centre)) in LAYER_BANDS.iter().enumerate() {
+        // Distance from the band centre, but the bottom/top bands extend outward
+        // (clamp distance below water's / above stone's centre) so there are no gaps.
+        let d = match k {
+            0 => (f - centre).max(0.0),
+            3 => (centre - f).max(0.0),
+            _ => (f - centre).abs(),
+        };
+        let w = (1.0 - d / blend.max(1e-4)).max(0.0);
+        weights[k] = w;
+        total += w;
+    }
+    if total <= 0.0 {
+        // `f` fell between bands with blend too small to reach: snap to nearest.
+        return LAYER_BANDS
+            .iter()
+            .min_by(|a, b| (f - a.1).abs().total_cmp(&(f - b.1).abs()))
+            .unwrap()
+            .0;
+    }
+
+    let mut r = hash01(gx, gy, gz, params.seed) * total;
+    for (k, (layer, _)) in LAYER_BANDS.iter().enumerate() {
+        r -= weights[k];
+        if r < 0.0 {
+            return *layer;
+        }
+    }
+    LAYER_BANDS[3].0
 }
 
 /// Generate one chunk of the global height-mapped terrain at `world_origin`,
@@ -382,7 +469,7 @@ pub fn generate_chunk(
             for y in 1..=height {
                 let i = ChunkShape::linearize([x, y, z]) as usize;
                 voxels[i] = FILLED;
-                layers[i] = layer_for_height(y, heightmap.max_height);
+                layers[i] = layer_at(gx, y as i64, gz, &heightmap.params);
             }
         }
     }

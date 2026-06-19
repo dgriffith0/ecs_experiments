@@ -46,6 +46,9 @@ export component AppWindow inherits Window {
     in-out property <float> gen-persistence: 0.5;
     in-out property <float> gen-max-height: 24;
     in-out property <float> gen-world-size: 4;
+    in-out property <float> gen-flatness: 0.6;
+    in-out property <float> gen-peakiness: 0.6;
+    in-out property <float> gen-layer-blend: 0.12;
 
     // In-game HUD bindings.
     in-out property <bool> ao-enabled: true;
@@ -175,6 +178,24 @@ export component AppWindow inherits Window {
                 minimum: 1;
                 maximum: 8;
                 value <=> root.gen-world-size;
+            }
+            ParamRow {
+                label: "Flatness";
+                minimum: 0;
+                maximum: 1;
+                value <=> root.gen-flatness;
+            }
+            ParamRow {
+                label: "Peakiness";
+                minimum: 0;
+                maximum: 1;
+                value <=> root.gen-peakiness;
+            }
+            ParamRow {
+                label: "Layer Blend";
+                minimum: 0;
+                maximum: 0.35;
+                value <=> root.gen-layer-blend;
             }
 
             Button {

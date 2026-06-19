@@ -407,6 +407,9 @@ pub async fn build_world(window: Arc<Window>) -> anyhow::Result<World> {
     c.set_gen_persistence(terrain_params.persistence as f32);
     c.set_gen_max_height(terrain_params.max_height as f32);
     c.set_gen_world_size(terrain_params.grid_size as f32);
+    c.set_gen_flatness(terrain_params.flatness as f32);
+    c.set_gen_peakiness(terrain_params.peakiness as f32);
+    c.set_gen_layer_blend(terrain_params.layer_blend as f32);
     let ui_overlay = ui::create_overlay(&ctx.device, ctx.config.format, ui_w, ui_h);
 
     world.insert_resource(Pipelines {

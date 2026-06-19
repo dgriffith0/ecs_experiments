@@ -32,6 +32,9 @@ pub fn regenerate_terrain(world: &mut World) {
             persistence: c.get_gen_persistence() as f64,
             max_height: c.get_gen_max_height().round() as u32,
             grid_size: c.get_gen_world_size().round() as u32,
+            flatness: c.get_gen_flatness() as f64,
+            peakiness: c.get_gen_peakiness() as f64,
+            layer_blend: c.get_gen_layer_blend() as f64,
         }
     };
     let heightmap = Heightmap::generate(&params);
