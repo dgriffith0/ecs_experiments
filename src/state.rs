@@ -51,10 +51,19 @@ impl State {
             a: 1.0,
         };
 
-        let camera = CameraSystem::new(&ctx.device, &ctx.config, 0.2);
+        // Stand the camera at human eye height on the terrain surface, looking
+        // out across the world. Movement is ~0.5 m/frame (a brisk fly-cam pace).
+        let (cam_x, cam_z) = (16.0, 64.0);
+        let eye = Vec3::new(
+            cam_x,
+            voxel::terrain_surface_y(cam_x, cam_z, CHUNK_GRID_SIZE) + 1.7,
+            cam_z,
+        );
+        let camera = CameraSystem::new(&ctx.device, &ctx.config, 0.5, eye);
 
         let light_uniform = LightUniform {
-            position: glam::vec3(2.0, 2.0, 2.0),
+            // High above the terrain so it lights the surface from a steep angle.
+            position: glam::vec3(30.0, 40.0, 30.0),
             color: glam::vec3(1.0, 1.0, 1.0),
         };
 
@@ -311,8 +320,14 @@ impl State {
                 "fox.glb",
                 &ctx.device,
                 &ctx.queue,
-                Mat4::from_translation(Vec3::new(0.0, -0.5, -5.0))
-                    * Mat4::from_scale(Vec3::splat(0.03)),
+                {
+                    // Seat the fox on the ground a few metres ahead of the camera.
+                    // Native model is ~80 units tall, so 0.01 → ~0.8 m (real fox).
+                    let (fox_x, fox_z) = (16.0, 54.0);
+                    let fox_y = voxel::terrain_surface_y(fox_x, fox_z, CHUNK_GRID_SIZE);
+                    Mat4::from_translation(Vec3::new(fox_x, fox_y, fox_z))
+                        * Mat4::from_scale(Vec3::splat(0.01))
+                },
                 &gltf_texture_bind_group_layout,
                 &gltf_model_bind_group_layout,
             )

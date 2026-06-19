@@ -25,9 +25,9 @@ pub const NUM_TEXTURE_LAYERS: u32 = 4;
 
 /// Edge length of a chunk in voxels.
 const CHUNK: u32 = 32;
-/// World-space size of a single voxel. Voxels are small so a 4×4 grid of 32³
-/// chunks fits comfortably within the camera's view (znear 0.1, zfar 100).
-const VOXEL_SIZE: f32 = 0.1;
+/// World-space size of a single voxel: 1 unit = 1 metre, so one block is 1 m
+/// (Minecraft-style). A 4×4 grid of 32³ chunks is then a 128 m × 128 m world.
+const VOXEL_SIZE: f32 = 1.0;
 
 /// Seed for the terrain height map. Fixed so the world is deterministic.
 const TERRAIN_SEED: u32 = 42;
@@ -38,6 +38,38 @@ const NOISE_SCALE: f64 = 0.03;
 const MAX_TERRAIN_HEIGHT: u32 = 24;
 /// Shortest possible column, so valleys keep a solid floor instead of holes.
 const MIN_TERRAIN_HEIGHT: u32 = 2;
+
+/// World-space Y of every chunk's floor. Chunks are centred on the origin
+/// vertically, so the terrain surface sits between this and `+MAX_TERRAIN_HEIGHT`.
+const TERRAIN_BASE_Y: f32 = -(CHUNK as f32 * VOXEL_SIZE) / 2.0;
+/// Distance the whole grid is pushed along -Z. 0 keeps it centred on the origin.
+const GRID_Z_PUSH: f32 = 0.0;
+
+/// Half the world-space span between the first and last chunk origins; used to
+/// centre the grid on the origin in X/Z. Also converts world↔global-voxel coords.
+fn grid_half(grid: u32) -> f32 {
+    (grid as f32 - 1.0) * CHUNK as f32 * VOXEL_SIZE / 2.0
+}
+
+/// Solid-voxel height of the global terrain column at voxel coords `(gx, gz)`.
+/// Shared by chunk generation and surface queries so they always agree.
+fn column_height(noise: &Fbm<Perlin>, gx: i64, gz: i64) -> u32 {
+    let n = noise.get([gx as f64 * NOISE_SCALE, gz as f64 * NOISE_SCALE]); // -1..1
+    let t = ((n + 1.0) * 0.5).clamp(0.0, 1.0); // 0..1
+    MIN_TERRAIN_HEIGHT + (t * (MAX_TERRAIN_HEIGHT - MIN_TERRAIN_HEIGHT) as f64) as u32
+}
+
+/// World-space Y of the terrain surface (top of the tallest solid voxel) at the
+/// given world `(x, z)` in a `grid`×`grid` world. Recreates the shared height
+/// map, so callers can seat objects on the ground without storing the noise.
+pub fn terrain_surface_y(world_x: f32, world_z: f32, grid: u32) -> f32 {
+    let noise = Fbm::<Perlin>::new(TERRAIN_SEED);
+    let half = grid_half(grid);
+    // Invert the world→global-voxel mapping from `generate_chunk_grid`.
+    let gx = ((world_x + half) / VOXEL_SIZE).round() as i64;
+    let gz = ((world_z + half + GRID_Z_PUSH) / VOXEL_SIZE).round() as i64;
+    column_height(&noise, gx, gz) as f32 * VOXEL_SIZE + TERRAIN_BASE_Y
+}
 
 // The meshing kernel needs a 1-voxel border of padding so it can test the
 // neighbours of boundary voxels without reading out of bounds, hence 32 + 2.
@@ -207,10 +239,7 @@ pub fn generate_chunk(
             if gx < 0 || gz < 0 || gx >= extent || gz >= extent {
                 continue;
             }
-            let n = noise.get([gx as f64 * NOISE_SCALE, gz as f64 * NOISE_SCALE]); // -1..1
-            let t = ((n + 1.0) * 0.5).clamp(0.0, 1.0); // 0..1
-            let height =
-                MIN_TERRAIN_HEIGHT + (t * (MAX_TERRAIN_HEIGHT - MIN_TERRAIN_HEIGHT) as f64) as u32;
+            let height = column_height(noise, gx, gz);
             for y in 1..=height {
                 let i = ChunkShape::linearize([x, y, z]) as usize;
                 voxels[i] = FILLED;
@@ -328,8 +357,7 @@ pub fn generate_chunk_grid(device: &wgpu::Device, grid: u32) -> Vec<VoxelChunk> 
     let noise = Fbm::<Perlin>::new(TERRAIN_SEED);
     // Chunks touch exactly so the terrain is continuous across borders.
     let spacing = CHUNK as f32 * VOXEL_SIZE;
-    let half = (grid as f32 - 1.0) * spacing / 2.0;
-    let chunk_extent = CHUNK as f32 * VOXEL_SIZE;
+    let half = grid_half(grid);
 
     let grid_voxel_extent = grid * CHUNK;
     let mut chunks = Vec::with_capacity((grid * grid) as usize);
@@ -337,10 +365,8 @@ pub fn generate_chunk_grid(device: &wgpu::Device, grid: u32) -> Vec<VoxelChunk> 
         for cx in 0..grid {
             let origin = Vec3::new(
                 cx as f32 * spacing - half,
-                // Drop the grid below the camera's eye line and centre it on y=0.
-                -chunk_extent / 2.0,
-                // Push the grid in front of the camera (which looks toward -Z).
-                cz as f32 * spacing - half - 6.0,
+                TERRAIN_BASE_Y,
+                cz as f32 * spacing - half - GRID_Z_PUSH,
             );
             let chunk_voxel_offset = UVec2::new(cx * CHUNK, cz * CHUNK);
             chunks.push(generate_chunk(

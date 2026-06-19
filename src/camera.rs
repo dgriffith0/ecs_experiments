@@ -85,17 +85,22 @@ pub struct CameraSystem {
 }
 
 impl CameraSystem {
-    pub fn new(device: &wgpu::Device, config: &wgpu::SurfaceConfiguration, speed: f32) -> Self {
+    pub fn new(
+        device: &wgpu::Device,
+        config: &wgpu::SurfaceConfiguration,
+        speed: f32,
+        eye: Vec3,
+    ) -> Self {
         let camera = Camera {
-            // 1 unit up and 2 units back from the origin...
-            position: Vec3::new(0.0, 1.0, 2.0),
-            // ...looking toward -Z (yaw = -90°) and level with the horizon.
+            position: eye,
+            // Look toward -Z (yaw = -90°) and level with the horizon.
             yaw: -std::f32::consts::FRAC_PI_2,
             pitch: 0.0,
             aspect: config.width as f32 / config.height as f32,
             fovy: 45.0,
+            // 10 cm near plane; far plane covers the 128 m metric world.
             znear: 0.1,
-            zfar: 100.0,
+            zfar: 500.0,
         };
 
         let mut uniform = CameraUniform::new();
