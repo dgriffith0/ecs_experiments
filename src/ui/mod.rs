@@ -23,7 +23,7 @@ use crate::scene::terrain::VoxelSettings;
 slint::include_modules!(); // generates `AppWindow` from ui/app.slint
 
 /// Debug toggle: when `true`, skip the title screen and start in-game.
-pub const SKIP_TITLE_SCREEN: bool = true;
+pub const SKIP_TITLE_SCREEN: bool = false;
 
 /// Minimal Slint platform: hands back our software window, no event loop (we
 /// drive rendering manually each frame).

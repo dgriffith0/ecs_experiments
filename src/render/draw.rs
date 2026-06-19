@@ -119,8 +119,8 @@ pub fn render(world: &mut World) {
     ) = state.get(world);
 
     // The title screen draws only the UI overlay (its background image); the 3D
-    // scene is rendered once the game has started.
-    let in_game = ui.component.get_in_game();
+    // scene is rendered in-game and in the terrain generator (a live preview).
+    let show_world = ui.component.get_in_game() || ui.component.get_in_terrain_generator();
 
     let output = match ctx.surface.get_current_texture() {
         wgpu::CurrentSurfaceTexture::Success(t) => t,
@@ -181,7 +181,7 @@ pub fn render(world: &mut World) {
             multiview_mask: None,
         });
 
-        if in_game {
+        if show_world {
             // Light marker.
             render_pass.set_pipeline(&pipelines.light);
             render_pass.draw_light_model(&marker.0, camera_bg, light_bg);

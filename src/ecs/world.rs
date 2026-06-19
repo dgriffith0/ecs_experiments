@@ -37,9 +37,6 @@ use crate::scene::terrain::{self as voxel, VoxelSettings};
 use crate::ui::{self, render_ui, sync_ui};
 use crate::util as utils;
 
-/// Side length (in chunks) of the flat voxel chunk grid.
-const CHUNK_GRID_SIZE: u32 = 4;
-
 /// Build the per-frame schedule: simulate, upload, then render (chained, run
 /// single-threaded since the render context and uploads are non-send).
 pub fn build_schedule() -> Schedule {
@@ -120,7 +117,8 @@ pub async fn build_world(window: Arc<Window>) -> anyhow::Result<World> {
     let mut world = World::new();
 
     // Precompute the terrain heightmap once; chunk meshing and picking read it.
-    let heightmap = voxel::Heightmap::generate(CHUNK_GRID_SIZE);
+    let terrain_params = voxel::TerrainParams::default();
+    let heightmap = voxel::Heightmap::generate(&terrain_params);
 
     // --- Shared bind group layouts ---
     let camera_layout = uniform_layout(
@@ -400,6 +398,15 @@ pub async fn build_world(window: Arc<Window>) -> anyhow::Result<World> {
         .set_ao_enabled(voxel_settings.ao_enabled != 0);
     slint_ui.component.set_animation_clip(1); // Walk
     slint_ui.component.set_in_game(ui::SKIP_TITLE_SCREEN);
+    // Seed the terrain-generator sliders from the default parameters.
+    let c = &slint_ui.component;
+    c.set_gen_seed(terrain_params.seed as f32);
+    c.set_gen_frequency(terrain_params.frequency as f32);
+    c.set_gen_octaves(terrain_params.octaves as f32);
+    c.set_gen_lacunarity(terrain_params.lacunarity as f32);
+    c.set_gen_persistence(terrain_params.persistence as f32);
+    c.set_gen_max_height(terrain_params.max_height as f32);
+    c.set_gen_world_size(terrain_params.grid_size as f32);
     let ui_overlay = ui::create_overlay(&ctx.device, ctx.config.format, ui_w, ui_h);
 
     world.insert_resource(Pipelines {
@@ -430,6 +437,7 @@ pub async fn build_world(window: Arc<Window>) -> anyhow::Result<World> {
     world.insert_resource(selection_box);
     world.insert_resource(ui_overlay);
     world.insert_resource(heightmap);
+    world.insert_resource(terrain_params);
     world.insert_non_send_resource(slint_ui);
     world.insert_non_send_resource(ctx);
 

@@ -17,7 +17,7 @@ use block_mesh::{
 };
 use encase::ShaderType;
 use glam::{IVec3, UVec2, Vec3};
-use noise::{Fbm, NoiseFn, Perlin};
+use noise::{Fbm, MultiFractal, NoiseFn, Perlin};
 use wgpu::util::DeviceExt;
 
 /// Number of texture layers in the array texture.
@@ -29,15 +29,55 @@ const CHUNK: u32 = 32;
 /// (Minecraft-style). A 4×4 grid of 32³ chunks is then a 128 m × 128 m world.
 const VOXEL_SIZE: f32 = 1.0;
 
-/// Seed for the terrain height map. Fixed so the world is deterministic.
-const TERRAIN_SEED: u32 = 42;
-/// Horizontal frequency of the height map, in world-voxel units. Smaller values
-/// give broader, gentler hills; larger values give choppier terrain.
-const NOISE_SCALE: f64 = 0.03;
-/// Tallest possible column. Must stay `<= CHUNK` so columns fit the interior.
-const MAX_TERRAIN_HEIGHT: u32 = 24;
 /// Shortest possible column, so valleys keep a solid floor instead of holes.
 const MIN_TERRAIN_HEIGHT: u32 = 2;
+/// Largest world (chunks per side) the generator allows.
+pub const MAX_GRID: u32 = 8;
+
+/// Tunable terrain-generation parameters: the Fbm noise knobs plus world size.
+/// Stored as a resource; the [`Heightmap`] is (re)built from these.
+#[derive(bevy_ecs::prelude::Resource, Clone, Copy)]
+pub struct TerrainParams {
+    pub seed: u32,
+    /// Horizontal frequency of the noise, in world-voxel units. Smaller is
+    /// broader/gentler hills; larger is choppier.
+    pub frequency: f64,
+    pub octaves: usize,
+    pub lacunarity: f64,
+    pub persistence: f64,
+    /// Tallest possible column; clamped to `(MIN_TERRAIN_HEIGHT, CHUNK]`.
+    pub max_height: u32,
+    /// Chunks per side; clamped to `[1, MAX_GRID]`.
+    pub grid_size: u32,
+}
+
+impl Default for TerrainParams {
+    /// Reproduces the original world: `Fbm::new(42)` defaults + a `×0.03` scale.
+    fn default() -> Self {
+        Self {
+            seed: 42,
+            frequency: 0.03,
+            octaves: 6,
+            lacunarity: std::f64::consts::PI * 2.0 / 3.0,
+            persistence: 0.5,
+            max_height: 24,
+            grid_size: 4,
+        }
+    }
+}
+
+impl TerrainParams {
+    /// Clamp every field to a valid range so a stray slider value can't produce
+    /// columns that overflow a chunk or a zero-size world.
+    fn sanitized(&self) -> Self {
+        Self {
+            octaves: self.octaves.clamp(1, 32),
+            max_height: self.max_height.clamp(MIN_TERRAIN_HEIGHT + 1, CHUNK),
+            grid_size: self.grid_size.clamp(1, MAX_GRID),
+            ..*self
+        }
+    }
+}
 
 /// World-space Y of every chunk's floor. Chunks are centred on the origin
 /// vertically, so the terrain surface sits between this and `+MAX_TERRAIN_HEIGHT`.
@@ -53,10 +93,10 @@ fn grid_half(grid: u32) -> f32 {
 
 /// Solid-voxel height of the global terrain column at voxel coords `(gx, gz)`.
 /// Shared by chunk generation and surface queries so they always agree.
-fn column_height(noise: &Fbm<Perlin>, gx: i64, gz: i64) -> u32 {
-    let n = noise.get([gx as f64 * NOISE_SCALE, gz as f64 * NOISE_SCALE]); // -1..1
+fn column_height(noise: &Fbm<Perlin>, gx: i64, gz: i64, params: &TerrainParams) -> u32 {
+    let n = noise.get([gx as f64 * params.frequency, gz as f64 * params.frequency]); // -1..1
     let t = ((n + 1.0) * 0.5).clamp(0.0, 1.0); // 0..1
-    MIN_TERRAIN_HEIGHT + (t * (MAX_TERRAIN_HEIGHT - MIN_TERRAIN_HEIGHT) as f64) as u32
+    MIN_TERRAIN_HEIGHT + (t * (params.max_height - MIN_TERRAIN_HEIGHT) as f64) as u32
 }
 
 /// Precomputed terrain: the solid-voxel height of every column in a `grid`×`grid`
@@ -68,21 +108,29 @@ pub struct Heightmap {
     grid: u32,
     /// Columns per side (`grid * CHUNK`).
     extent: u32,
+    /// Tallest column these heights were built with (for texture banding).
+    max_height: u32,
     /// Column heights, row-major: `heights[gz * extent + gx]`.
     heights: Vec<u32>,
 }
 
 impl Heightmap {
-    /// Sample the noise once for every column in the grid.
-    pub fn generate(grid: u32) -> Self {
-        let noise = Fbm::<Perlin>::new(TERRAIN_SEED);
+    /// Sample the noise once for every column, per the given parameters.
+    pub fn generate(params: &TerrainParams) -> Self {
+        let p = params.sanitized();
+        let noise = Fbm::<Perlin>::new(p.seed)
+            .set_octaves(p.octaves)
+            .set_lacunarity(p.lacunarity)
+            .set_persistence(p.persistence);
+        let grid = p.grid_size;
         let extent = grid * CHUNK;
         let heights = (0..extent * extent)
-            .map(|i| column_height(&noise, (i % extent) as i64, (i / extent) as i64))
+            .map(|i| column_height(&noise, (i % extent) as i64, (i / extent) as i64, &p))
             .collect();
         Self {
             grid,
             extent,
+            max_height: p.max_height,
             heights,
         }
     }
@@ -113,11 +161,21 @@ impl Heightmap {
 }
 
 /// World-space vertical extent any terrain can occupy, for bounding ray casts.
+/// Conservative (a full chunk tall) so it holds for any `max_height`.
 pub fn terrain_y_bounds() -> (f32, f32) {
-    (
-        TERRAIN_BASE_Y,
-        TERRAIN_BASE_Y + MAX_TERRAIN_HEIGHT as f32 * VOXEL_SIZE,
-    )
+    (TERRAIN_BASE_Y, TERRAIN_BASE_Y + CHUNK as f32 * VOXEL_SIZE)
+}
+
+/// Total world-space span (metres) of a `grid`×`grid` world.
+pub fn world_span(grid: u32) -> f32 {
+    grid as f32 * CHUNK as f32 * VOXEL_SIZE
+}
+
+/// World-space X/Z centre of the terrain grid (invariant, ~`(16, 16)`).
+pub fn world_center_xz(grid: u32) -> (f32, f32) {
+    let half = grid_half(grid);
+    let mid = (grid * CHUNK / 2) as f32 * VOXEL_SIZE;
+    (mid - half, mid - half - GRID_Z_PUSH)
 }
 
 /// The grid coordinate `(gx, gy, gz)` and world-space cube `(min, max)` of the
@@ -275,8 +333,8 @@ fn quad_indices(start: u32, ccw: bool, flip: bool) -> [u32; 6] {
 
 /// Pick a texture-array layer from a voxel's absolute height. Banding the layers
 /// by elevation gives the terrain clean horizontal strata.
-fn layer_for_height(y: u32) -> u32 {
-    let f = y as f32 / MAX_TERRAIN_HEIGHT as f32;
+fn layer_for_height(y: u32, max_height: u32) -> u32 {
+    let f = y as f32 / max_height as f32;
     if f < 0.25 {
         2 // water
     } else if f < 0.50 {
@@ -324,7 +382,7 @@ pub fn generate_chunk(
             for y in 1..=height {
                 let i = ChunkShape::linearize([x, y, z]) as usize;
                 voxels[i] = FILLED;
-                layers[i] = layer_for_height(y);
+                layers[i] = layer_for_height(y, heightmap.max_height);
             }
         }
     }

@@ -11,6 +11,7 @@ use winit::{
 
 use crate::ecs::components::{AnimationPlayer, SkinnedMesh};
 use crate::ecs::resources::{CursorPos, Input, VoxelSettingsRes};
+use crate::ecs::systems::regenerate_terrain;
 use crate::ecs::world::{build_schedule, build_world};
 use crate::picking;
 use crate::render::context::RenderContext;
@@ -81,6 +82,20 @@ impl ApplicationHandler for App {
         {
             event_loop.exit();
             return;
+        }
+
+        // The terrain generator's Regenerate button (and entering the screen)
+        // rebuilds the world from the slider values.
+        if world
+            .non_send_resource::<Ui>()
+            .component
+            .get_regenerate_requested()
+        {
+            world
+                .non_send_resource::<Ui>()
+                .component
+                .set_regenerate_requested(false);
+            regenerate_terrain(world);
         }
 
         match event {

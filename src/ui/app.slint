@@ -1,13 +1,51 @@
-import { Button, CheckBox, ComboBox, VerticalBox } from "std-widgets.slint";
+import { Slider, Button, CheckBox, ComboBox, VerticalBox } from "std-widgets.slint";
 
-// The app UI: a title screen (background image + Start/Exit) until `in-game` is
-// set, then the in-game HUD side panel over the transparent 3D viewport.
+// One labeled slider row for the terrain generator.
+component ParamRow inherits HorizontalLayout {
+    in property <string> label;
+    in property <float> minimum;
+    in property <float> maximum;
+    in-out property <float> value;
+    spacing: 8px;
+    Text {
+        text: root.label;
+        color: #cdd6f4;
+        width: 90px;
+        vertical-alignment: center;
+    }
+    Slider {
+        minimum: root.minimum;
+        maximum: root.maximum;
+        value <=> root.value;
+    }
+    Text {
+        text: "\{round(root.value * 1000) / 1000}";
+        color: white;
+        width: 46px;
+        vertical-alignment: center;
+        horizontal-alignment: right;
+    }
+}
+
+// The app UI: a title screen (background image + buttons) until a screen flag is
+// set, then either the terrain generator or the in-game HUD over the 3D viewport.
 export component AppWindow inherits Window {
     background: transparent;
 
     // Screen state + requests (read by Rust).
     in-out property <bool> in-game: false;
+    in-out property <bool> in-terrain-generator: false;
     in-out property <bool> exit-requested: false;
+    in-out property <bool> regenerate-requested: false;
+
+    // Terrain generator parameters (defaults reproduce the startup world).
+    in-out property <float> gen-seed: 42;
+    in-out property <float> gen-frequency: 0.03;
+    in-out property <float> gen-octaves: 6;
+    in-out property <float> gen-lacunarity: 2.094;
+    in-out property <float> gen-persistence: 0.5;
+    in-out property <float> gen-max-height: 24;
+    in-out property <float> gen-world-size: 4;
 
     // In-game HUD bindings.
     in-out property <bool> ao-enabled: true;
@@ -17,7 +55,7 @@ export component AppWindow inherits Window {
     in property <string> selected: "none";
 
     // --- Title screen ---
-    if !root.in-game: Rectangle {
+    if !root.in-game && !root.in-terrain-generator: Rectangle {
         Image {
             source: @image-url("../../res/background.png");
             image-fit: cover;
@@ -54,10 +92,110 @@ export component AppWindow inherits Window {
             HorizontalLayout {
                 alignment: center;
                 Button {
+                    text: "Terrain Generator";
+                    min-width: 220px;
+                    clicked => {
+                        root.in-terrain-generator = true;
+                        root.regenerate-requested = true;
+                    }
+                }
+            }
+            HorizontalLayout {
+                alignment: center;
+                Button {
                     text: "Exit";
                     min-width: 220px;
                     clicked => {
                         root.exit-requested = true;
+                    }
+                }
+            }
+        }
+    }
+
+    // --- Terrain generator: left control panel over a live preview ---
+    if root.in-terrain-generator: Rectangle {
+        x: 0;
+        y: 0;
+        width: 340px;
+        background: #1e1e2eF2;
+        border-color: #ffffff1A;
+        border-width: 1px;
+
+        VerticalBox {
+            alignment: start;
+            padding: 18px;
+            spacing: 10px;
+
+            Text {
+                text: "Terrain Generator";
+                font-size: 20px;
+                font-weight: 800;
+                color: white;
+            }
+
+            ParamRow {
+                label: "Seed";
+                minimum: 0;
+                maximum: 1000;
+                value <=> root.gen-seed;
+            }
+            ParamRow {
+                label: "Frequency";
+                minimum: 0.005;
+                maximum: 0.1;
+                value <=> root.gen-frequency;
+            }
+            ParamRow {
+                label: "Octaves";
+                minimum: 1;
+                maximum: 8;
+                value <=> root.gen-octaves;
+            }
+            ParamRow {
+                label: "Lacunarity";
+                minimum: 1.5;
+                maximum: 3.0;
+                value <=> root.gen-lacunarity;
+            }
+            ParamRow {
+                label: "Persistence";
+                minimum: 0.1;
+                maximum: 0.9;
+                value <=> root.gen-persistence;
+            }
+            ParamRow {
+                label: "Max Height";
+                minimum: 4;
+                maximum: 32;
+                value <=> root.gen-max-height;
+            }
+            ParamRow {
+                label: "World Size";
+                minimum: 1;
+                maximum: 8;
+                value <=> root.gen-world-size;
+            }
+
+            Button {
+                text: "Regenerate";
+                clicked => {
+                    root.regenerate-requested = true;
+                }
+            }
+            HorizontalLayout {
+                spacing: 10px;
+                Button {
+                    text: "Back";
+                    clicked => {
+                        root.in-terrain-generator = false;
+                    }
+                }
+                Button {
+                    text: "Start Game";
+                    clicked => {
+                        root.in-terrain-generator = false;
+                        root.in-game = true;
                     }
                 }
             }
