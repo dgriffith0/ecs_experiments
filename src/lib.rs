@@ -1,14 +1,10 @@
 mod app;
 mod assets;
-mod camera;
 mod ecs;
-mod gltf_model;
-mod light;
-mod model;
+mod picking;
 mod render;
-mod skybox;
-mod texture;
-mod utils;
-mod voxel;
+mod scene;
+mod ui;
+mod util;
 
 pub use app::run;

@@ -5,10 +5,11 @@
 //! `Send + Sync` GPU state or small per-frame data.
 
 use bevy_ecs::prelude::Resource;
-use glam::Mat4;
+use glam::{IVec3, Mat4, Vec3};
 use winit::keyboard::KeyCode;
 
-use crate::{model, skybox, texture, voxel};
+use crate::render::texture;
+use crate::scene::{model, skybox, terrain};
 
 /// The three render pipelines, built once at startup and shared every frame.
 #[derive(Resource)]
@@ -33,7 +34,7 @@ pub struct VoxelGpu {
 
 /// CPU-side voxel render settings (AO on/off). Uploaded to `VoxelGpu` on change.
 #[derive(Resource)]
-pub struct VoxelSettingsRes(pub voxel::VoxelSettings);
+pub struct VoxelSettingsRes(pub terrain::VoxelSettings);
 
 /// The cubemap sky (owns its own pipeline, uniform buffer, and bind groups).
 #[derive(Resource)]
@@ -51,6 +52,43 @@ pub struct BackgroundColor(pub wgpu::Color);
 /// and read by both the camera and skybox uploads.
 #[derive(Resource)]
 pub struct ViewProj(pub Mat4);
+
+/// Per-frame timing. `delta` is the wall-clock seconds since the last frame,
+/// used to advance animations at real speed.
+#[derive(Resource, Default)]
+pub struct Time {
+    pub delta: f32,
+    pub last: Option<std::time::Instant>,
+}
+
+/// The current selection (set by picking): nothing, a scene object entity, or an
+/// individual terrain voxel (its grid coord + world-space cube).
+#[derive(Resource, Default, Clone, Copy)]
+pub enum Selected {
+    #[default]
+    None,
+    Object(bevy_ecs::entity::Entity),
+    Voxel {
+        coord: IVec3,
+        min: Vec3,
+        max: Vec3,
+    },
+}
+
+/// Last physical cursor position, used by picking.
+#[derive(Resource, Default, Clone, Copy)]
+pub struct CursorPos(pub f32, pub f32);
+
+/// Wireframe selection-box overlay: a unit-cube line list transformed to the
+/// selected entity's world AABB and drawn on top of the scene.
+#[derive(Resource)]
+pub struct SelectionBox {
+    pub pipeline: wgpu::RenderPipeline,
+    pub edges: wgpu::Buffer,
+    pub uniform: wgpu::Buffer,
+    pub bind_group: wgpu::BindGroup,
+    pub visible: bool,
+}
 
 /// Held-key state for the free-fly camera, fed by winit keyboard events.
 #[derive(Resource, Default)]

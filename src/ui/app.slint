@@ -1,0 +1,118 @@
+import { Button, CheckBox, ComboBox, VerticalBox } from "std-widgets.slint";
+
+// The app UI: a title screen (background image + Start/Exit) until `in-game` is
+// set, then the in-game HUD side panel over the transparent 3D viewport.
+export component AppWindow inherits Window {
+    background: transparent;
+
+    // Screen state + requests (read by Rust).
+    in-out property <bool> in-game: false;
+    in-out property <bool> exit-requested: false;
+
+    // In-game HUD bindings.
+    in-out property <bool> ao-enabled: true;
+    in-out property <int> animation-clip: 1;
+    in property <float> fps;
+    in property <string> camera-pos;
+    in property <string> selected: "none";
+
+    // --- Title screen ---
+    if !root.in-game: Rectangle {
+        Image {
+            source: @image-url("../../res/background.png");
+            image-fit: cover;
+            width: 100%;
+            height: 100%;
+        }
+        // Dim the image a touch so the buttons read clearly.
+        Rectangle {
+            background: #00000055;
+        }
+        VerticalLayout {
+            alignment: center;
+            spacing: 20px;
+
+            HorizontalLayout {
+                alignment: center;
+                Text {
+                    text: "ECS Experiments";
+                    font-size: 56px;
+                    font-weight: 800;
+                    color: white;
+                }
+            }
+            HorizontalLayout {
+                alignment: center;
+                Button {
+                    text: "Start Game";
+                    min-width: 220px;
+                    clicked => {
+                        root.in-game = true;
+                    }
+                }
+            }
+            HorizontalLayout {
+                alignment: center;
+                Button {
+                    text: "Exit";
+                    min-width: 220px;
+                    clicked => {
+                        root.exit-requested = true;
+                    }
+                }
+            }
+        }
+    }
+
+    // --- In-game HUD: left side panel ---
+    if root.in-game: Rectangle {
+        x: 0;
+        y: 0;
+        width: 260px;
+        background: #1e1e2eE6;
+        border-color: #ffffff1A;
+        border-width: 1px;
+
+        VerticalBox {
+            alignment: start;
+            padding: 18px;
+            spacing: 12px;
+
+            Text {
+                text: "ecs_experiments";
+                font-size: 20px;
+                font-weight: 800;
+                color: white;
+            }
+
+            Text {
+                text: "FPS: \{round(root.fps)}";
+                color: #cdd6f4;
+            }
+            Text {
+                text: "Camera: \{root.camera-pos}";
+                color: #cdd6f4;
+                wrap: word-wrap;
+            }
+            Text {
+                text: "Selected: \{root.selected}";
+                color: #f9e2af;
+                wrap: word-wrap;
+            }
+
+            CheckBox {
+                text: "Ambient occlusion";
+                checked <=> root.ao-enabled;
+            }
+
+            Text {
+                text: "Animation";
+                color: #cdd6f4;
+            }
+            ComboBox {
+                model: ["Survey", "Walk", "Run"];
+                current-index <=> root.animation-clip;
+            }
+        }
+    }
+}

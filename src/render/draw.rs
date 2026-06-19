@@ -8,13 +8,14 @@ use bevy_ecs::system::SystemState;
 
 use crate::ecs::components::{Camera, CameraGpu, LightGpu};
 use crate::ecs::resources::{
-    BackgroundColor, DepthTexture, LightMarker, Pipelines, SkyboxRes, VoxelGpu,
+    BackgroundColor, DepthTexture, LightMarker, Pipelines, SelectionBox, SkyboxRes, VoxelGpu,
 };
-use crate::gltf_model::GltfModel;
-use crate::model::DrawLight;
 use crate::render::context::RenderContext;
-use crate::texture;
-use crate::voxel::VoxelChunk;
+use crate::render::texture;
+use crate::scene::gltf_model::GltfModel;
+use crate::scene::model::DrawLight;
+use crate::scene::terrain::VoxelChunk;
+use crate::ui::{self, Ui, UiOverlay};
 
 /// Reconfigure the surface + depth texture and update the camera aspect ratio.
 /// Shared by the `Resized` event and the render system's lazy first-configure.
@@ -32,6 +33,25 @@ pub fn resize(world: &mut World, width: u32, height: u32) {
         texture::Texture::create_depth_texture(&ctx.device, &ctx.config, "depth_texture")
     };
     world.resource_mut::<DepthTexture>().0 = depth;
+
+    // Recreate the UI overlay (texture + CPU buffer) and resize the Slint window.
+    let overlay = {
+        let ctx = world.non_send_resource::<RenderContext>();
+        ui::create_overlay(&ctx.device, ctx.config.format, width, height)
+    };
+    *world.resource_mut::<UiOverlay>() = overlay;
+    {
+        let scale = world
+            .non_send_resource::<RenderContext>()
+            .window
+            .scale_factor() as f32;
+        let ui = world.non_send_resource::<Ui>();
+        ui.adapter
+            .dispatch_event(slint::platform::WindowEvent::ScaleFactorChanged {
+                scale_factor: scale,
+            });
+        ui.adapter.set_size(slint::PhysicalSize::new(width, height));
+    }
 
     let aspect = width as f32 / height as f32;
     let mut q = world.query::<&mut Camera>();
@@ -73,13 +93,34 @@ pub fn render(world: &mut World) {
         Res<BackgroundColor>,
         Res<SkyboxRes>,
         Res<LightMarker>,
+        Res<UiOverlay>,
+        Res<SelectionBox>,
+        NonSend<Ui>,
         Query<&CameraGpu>,
         Query<&LightGpu>,
         Query<&VoxelChunk>,
         Query<&GltfModel>,
     )> = SystemState::new(world);
-    let (ctx, pipelines, depth, voxel_gpu, bg, skybox, marker, cam_q, light_q, chunks, gltfs) =
-        state.get(world);
+    let (
+        ctx,
+        pipelines,
+        depth,
+        voxel_gpu,
+        bg,
+        skybox,
+        marker,
+        ui_overlay,
+        sel_box,
+        ui,
+        cam_q,
+        light_q,
+        chunks,
+        gltfs,
+    ) = state.get(world);
+
+    // The title screen draws only the UI overlay (its background image); the 3D
+    // scene is rendered once the game has started.
+    let in_game = ui.component.get_in_game();
 
     let output = match ctx.surface.get_current_texture() {
         wgpu::CurrentSurfaceTexture::Success(t) => t,
@@ -140,38 +181,54 @@ pub fn render(world: &mut World) {
             multiview_mask: None,
         });
 
-        // Light marker.
-        render_pass.set_pipeline(&pipelines.light);
-        render_pass.draw_light_model(&marker.0, camera_bg, light_bg);
+        if in_game {
+            // Light marker.
+            render_pass.set_pipeline(&pipelines.light);
+            render_pass.draw_light_model(&marker.0, camera_bg, light_bg);
 
-        // Voxel chunks: texture (0), camera (1), light (2), settings (3) are shared;
-        // each chunk entity swaps its own vertex/index buffers.
-        render_pass.set_pipeline(&pipelines.voxel);
-        render_pass.set_bind_group(0, &voxel_gpu.texture_bind_group, &[]);
-        render_pass.set_bind_group(1, camera_bg, &[]);
-        render_pass.set_bind_group(2, light_bg, &[]);
-        render_pass.set_bind_group(3, &voxel_gpu.settings_bind_group, &[]);
-        for chunk in chunks.iter() {
-            render_pass.set_vertex_buffer(0, chunk.vertex_buffer.slice(..));
-            render_pass.set_index_buffer(chunk.index_buffer.slice(..), wgpu::IndexFormat::Uint32);
-            render_pass.draw_indexed(0..chunk.num_indices, 0, 0..1);
+            // Voxel chunks: texture (0), camera (1), light (2), settings (3) are shared;
+            // each chunk entity swaps its own vertex/index buffers.
+            render_pass.set_pipeline(&pipelines.voxel);
+            render_pass.set_bind_group(0, &voxel_gpu.texture_bind_group, &[]);
+            render_pass.set_bind_group(1, camera_bg, &[]);
+            render_pass.set_bind_group(2, light_bg, &[]);
+            render_pass.set_bind_group(3, &voxel_gpu.settings_bind_group, &[]);
+            for chunk in chunks.iter() {
+                render_pass.set_vertex_buffer(0, chunk.vertex_buffer.slice(..));
+                render_pass
+                    .set_index_buffer(chunk.index_buffer.slice(..), wgpu::IndexFormat::Uint32);
+                render_pass.draw_indexed(0..chunk.num_indices, 0, 0..1);
+            }
+
+            // glTF models: camera (1) + light (2) shared; each entity swaps texture (0),
+            // transform (3), and buffers.
+            render_pass.set_pipeline(&pipelines.gltf);
+            render_pass.set_bind_group(1, camera_bg, &[]);
+            render_pass.set_bind_group(2, light_bg, &[]);
+            for m in gltfs.iter() {
+                render_pass.set_bind_group(0, &m.texture_bind_group, &[]);
+                render_pass.set_bind_group(3, &m.model_bind_group, &[]);
+                render_pass.set_vertex_buffer(0, m.vertex_buffer.slice(..));
+                render_pass.set_index_buffer(m.index_buffer.slice(..), wgpu::IndexFormat::Uint32);
+                render_pass.draw_indexed(0..m.num_indices, 0, 0..1);
+            }
+
+            // Sky fills pixels the scene didn't cover.
+            skybox.0.draw(&mut render_pass);
+
+            // Selection highlight box (drawn on top, ignoring depth).
+            if sel_box.visible {
+                render_pass.set_pipeline(&sel_box.pipeline);
+                render_pass.set_bind_group(0, &sel_box.bind_group, &[]);
+                render_pass.set_vertex_buffer(0, sel_box.edges.slice(..));
+                render_pass.draw(0..24, 0..1);
+            }
         }
 
-        // glTF models: camera (1) + light (2) shared; each entity swaps texture (0),
-        // transform (3), and buffers.
-        render_pass.set_pipeline(&pipelines.gltf);
-        render_pass.set_bind_group(1, camera_bg, &[]);
-        render_pass.set_bind_group(2, light_bg, &[]);
-        for m in gltfs.iter() {
-            render_pass.set_bind_group(0, &m.texture_bind_group, &[]);
-            render_pass.set_bind_group(3, &m.model_bind_group, &[]);
-            render_pass.set_vertex_buffer(0, m.vertex_buffer.slice(..));
-            render_pass.set_index_buffer(m.index_buffer.slice(..), wgpu::IndexFormat::Uint32);
-            render_pass.draw_indexed(0..m.num_indices, 0, 0..1);
-        }
-
-        // Sky last so it only fills pixels the scene didn't cover.
-        skybox.0.draw(&mut render_pass);
+        // UI overlay on top of everything (premultiplied-alpha composite).
+        render_pass.set_pipeline(&ui_overlay.pipeline);
+        render_pass.set_bind_group(0, &ui_overlay.bind_group, &[]);
+        render_pass.draw(0..3, 0..1);
     }
 
     ctx.queue.submit(std::iter::once(encoder.finish()));

@@ -59,16 +59,96 @@ fn column_height(noise: &Fbm<Perlin>, gx: i64, gz: i64) -> u32 {
     MIN_TERRAIN_HEIGHT + (t * (MAX_TERRAIN_HEIGHT - MIN_TERRAIN_HEIGHT) as f64) as u32
 }
 
-/// World-space Y of the terrain surface (top of the tallest solid voxel) at the
-/// given world `(x, z)` in a `grid`×`grid` world. Recreates the shared height
-/// map, so callers can seat objects on the ground without storing the noise.
-pub fn terrain_surface_y(world_x: f32, world_z: f32, grid: u32) -> f32 {
-    let noise = Fbm::<Perlin>::new(TERRAIN_SEED);
+/// Precomputed terrain: the solid-voxel height of every column in a `grid`×`grid`
+/// world. Built once from the noise (see `Heightmap::generate`) and stored as a
+/// resource, so chunk meshing and picking are plain array lookups — no per-query
+/// noise sampling.
+#[derive(bevy_ecs::prelude::Resource)]
+pub struct Heightmap {
+    grid: u32,
+    /// Columns per side (`grid * CHUNK`).
+    extent: u32,
+    /// Column heights, row-major: `heights[gz * extent + gx]`.
+    heights: Vec<u32>,
+}
+
+impl Heightmap {
+    /// Sample the noise once for every column in the grid.
+    pub fn generate(grid: u32) -> Self {
+        let noise = Fbm::<Perlin>::new(TERRAIN_SEED);
+        let extent = grid * CHUNK;
+        let heights = (0..extent * extent)
+            .map(|i| column_height(&noise, (i % extent) as i64, (i / extent) as i64))
+            .collect();
+        Self {
+            grid,
+            extent,
+            heights,
+        }
+    }
+
+    pub fn grid(&self) -> u32 {
+        self.grid
+    }
+
+    /// Solid-voxel height of the column at global voxel coords `(gx, gz)`.
+    /// Columns outside the grid report `MIN_TERRAIN_HEIGHT`.
+    pub fn height(&self, gx: i64, gz: i64) -> u32 {
+        let e = self.extent as i64;
+        if gx < 0 || gz < 0 || gx >= e || gz >= e {
+            MIN_TERRAIN_HEIGHT
+        } else {
+            self.heights[(gz * e + gx) as usize]
+        }
+    }
+
+    /// World-space Y of the terrain surface (top of the tallest solid voxel) at
+    /// world `(x, z)`.
+    pub fn surface_y(&self, world_x: f32, world_z: f32) -> f32 {
+        let half = grid_half(self.grid);
+        let gx = ((world_x + half) / VOXEL_SIZE).round() as i64;
+        let gz = ((world_z + half + GRID_Z_PUSH) / VOXEL_SIZE).round() as i64;
+        self.height(gx, gz) as f32 * VOXEL_SIZE + TERRAIN_BASE_Y
+    }
+}
+
+/// World-space vertical extent any terrain can occupy, for bounding ray casts.
+pub fn terrain_y_bounds() -> (f32, f32) {
+    (
+        TERRAIN_BASE_Y,
+        TERRAIN_BASE_Y + MAX_TERRAIN_HEIGHT as f32 * VOXEL_SIZE,
+    )
+}
+
+/// The grid coordinate `(gx, gy, gz)` and world-space cube `(min, max)` of the
+/// voxel cell containing `point`, snapped to the same grid the meshes use.
+pub fn voxel_cell_at(point: Vec3, grid: u32) -> (glam::IVec3, Vec3, Vec3) {
     let half = grid_half(grid);
-    // Invert the world→global-voxel mapping from `generate_chunk_grid`.
-    let gx = ((world_x + half) / VOXEL_SIZE).round() as i64;
-    let gz = ((world_z + half + GRID_Z_PUSH) / VOXEL_SIZE).round() as i64;
-    column_height(&noise, gx, gz) as f32 * VOXEL_SIZE + TERRAIN_BASE_Y
+    let gx = ((point.x + half) / VOXEL_SIZE).floor();
+    let gy = ((point.y - TERRAIN_BASE_Y) / VOXEL_SIZE).floor();
+    let gz = ((point.z + half + GRID_Z_PUSH) / VOXEL_SIZE).floor();
+    let min = Vec3::new(
+        gx * VOXEL_SIZE - half,
+        gy * VOXEL_SIZE + TERRAIN_BASE_Y,
+        gz * VOXEL_SIZE - half - GRID_Z_PUSH,
+    );
+    (
+        glam::IVec3::new(gx as i32, gy as i32, gz as i32),
+        min,
+        min + Vec3::splat(VOXEL_SIZE),
+    )
+}
+
+/// Map a world `(x, z)` to its chunk grid coordinate, or `None` if outside the grid.
+pub fn chunk_coord_at(world_x: f32, world_z: f32, grid: u32) -> Option<(u32, u32)> {
+    let half = grid_half(grid);
+    let gx = ((world_x + half) / VOXEL_SIZE).floor() as i64;
+    let gz = ((world_z + half + GRID_Z_PUSH) / VOXEL_SIZE).floor() as i64;
+    let extent = (grid * CHUNK) as i64;
+    if gx < 0 || gz < 0 || gx >= extent || gz >= extent {
+        return None;
+    }
+    Some(((gx / CHUNK as i64) as u32, (gz / CHUNK as i64) as u32))
 }
 
 // The meshing kernel needs a 1-voxel border of padding so it can test the
@@ -216,9 +296,9 @@ pub fn generate_chunk(
     device: &wgpu::Device,
     world_origin: Vec3,
     chunk_voxel_offset: UVec2,
-    grid_voxel_extent: u32,
-    noise: &Fbm<Perlin>,
+    heightmap: &Heightmap,
 ) -> VoxelChunk {
+    let grid_voxel_extent = heightmap.extent;
     // Fill the padded volume from the global height map. We sample every column
     // including the 1-voxel border: that border mirrors the neighbouring chunk's
     // edge columns, so block-mesh culls the faces at chunk seams. The top
@@ -240,7 +320,7 @@ pub fn generate_chunk(
             if gx < 0 || gz < 0 || gx >= extent || gz >= extent {
                 continue;
             }
-            let height = column_height(noise, gx, gz);
+            let height = heightmap.height(gx, gz);
             for y in 1..=height {
                 let i = ChunkShape::linearize([x, y, z]) as usize;
                 voxels[i] = FILLED;
@@ -352,15 +432,14 @@ pub fn generate_chunk(
     }
 }
 
-/// Build a flat `grid × grid` plane of chunks forming one seamless landscape
-/// driven by a single global height map.
-pub fn generate_chunk_grid(device: &wgpu::Device, grid: u32) -> Vec<VoxelChunk> {
-    let noise = Fbm::<Perlin>::new(TERRAIN_SEED);
+/// Build a flat plane of chunks forming one seamless landscape, meshed from the
+/// precomputed `Heightmap`.
+pub fn generate_chunk_grid(device: &wgpu::Device, heightmap: &Heightmap) -> Vec<VoxelChunk> {
+    let grid = heightmap.grid;
     // Chunks touch exactly so the terrain is continuous across borders.
     let spacing = CHUNK as f32 * VOXEL_SIZE;
     let half = grid_half(grid);
 
-    let grid_voxel_extent = grid * CHUNK;
     let mut chunks = Vec::with_capacity((grid * grid) as usize);
     for cz in 0..grid {
         for cx in 0..grid {
@@ -374,8 +453,7 @@ pub fn generate_chunk_grid(device: &wgpu::Device, grid: u32) -> Vec<VoxelChunk> 
                 device,
                 origin,
                 chunk_voxel_offset,
-                grid_voxel_extent,
-                &noise,
+                heightmap,
             ));
         }
     }

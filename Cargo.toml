@@ -18,6 +18,7 @@ noise = "0.9.0"
 pollster = "0.4.0"
 rand = "0.9"
 serde = "1.0.228"
+slint = { version = "1.16.1", default-features = false, features = ["compat-1-2", "std", "renderer-software"] }
 tobj = { version = "4.0.3", features = ["tokio", "async"] }
 wgpu = "29.0.3"
 winit = "0.30.13"
@@ -26,3 +27,4 @@ winit = "0.30.13"
 anyhow = "1.0.102"
 fs_extra = "1.2"
 glob = "0.3.3"
+slint-build = "1.16.1"

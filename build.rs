@@ -13,5 +13,8 @@ fn main() -> Result<()> {
     let paths_to_copy = vec!["res/"];
     copy_items(&paths_to_copy, out_dir, &copy_options)?;
 
+    // Compile the Slint UI; generated code is pulled in via slint::include_modules!().
+    slint_build::compile("src/ui/app.slint").map_err(|e| anyhow!("slint compile: {e}"))?;
+
     Ok(())
 }

@@ -10,7 +10,9 @@ use encase::ShaderType;
 use glam::Mat4;
 use wgpu::util::DeviceExt;
 
-use crate::{assets, texture, utils};
+use crate::assets;
+use crate::render::texture;
+use crate::util as utils;
 
 /// Uniform mirrored by `skybox.wgsl`: the inverse of the camera's full
 /// view-projection, used to unproject clip-space pixels back into world rays.
@@ -129,7 +131,7 @@ impl Skybox {
 
         let shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
             label: Some("Skybox Shader"),
-            source: wgpu::ShaderSource::Wgsl(include_str!("skybox.wgsl").into()),
+            source: wgpu::ShaderSource::Wgsl(include_str!("../render/shaders/skybox.wgsl").into()),
         });
 
         let pipeline = device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {

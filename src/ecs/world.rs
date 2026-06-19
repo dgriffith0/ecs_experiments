@@ -11,23 +11,31 @@ use glam::Vec3;
 use wgpu::util::DeviceExt;
 use winit::window::Window;
 
-use crate::camera::{self, CameraUniform};
-use crate::ecs::components::{Camera, CameraGpu, FlyController, LightGpu, PointLight, Transform};
+use crate::scene::camera::{self, CameraUniform};
+use crate::ecs::components::{
+    AnimationPlayer, Camera, CameraGpu, FlyController, LightGpu, Pickable, PointLight, Transform,
+};
 use crate::ecs::resources::{
-    BackgroundColor, DepthTexture, Input, LightMarker, Pipelines, SkyboxRes, ViewProj, VoxelGpu,
-    VoxelSettingsRes,
+    BackgroundColor, CursorPos, DepthTexture, Input, LightMarker, Pipelines, Selected, SkyboxRes,
+    Time, ViewProj, VoxelGpu, VoxelSettingsRes,
 };
 use crate::ecs::systems::{
-    fly_camera, orbit_light, update_view_proj, upload_camera, upload_light, upload_model_transforms,
-    upload_skybox, upload_voxel_settings,
+    animate, fly_camera, generate_terrain, orbit_light, update_selection_box, update_time,
+    update_view_proj, upload_camera, upload_light, upload_model_transforms, upload_skybox,
+    upload_voxel_settings,
 };
-use crate::light::LightUniform;
-use crate::model::Vertex;
+use crate::assets;
 use crate::render::context::RenderContext;
 use crate::render::draw::render;
-use crate::render::pipeline::create_render_pipeline;
-use crate::voxel::{self, VoxelSettings};
-use crate::{assets, gltf_model, skybox, texture, utils};
+use crate::render::pipeline::{create_render_pipeline, create_selection_box};
+use crate::render::texture;
+use crate::scene::gltf_model;
+use crate::scene::light::LightUniform;
+use crate::scene::model::{self, Vertex};
+use crate::scene::skybox;
+use crate::scene::terrain::{self as voxel, VoxelSettings};
+use crate::ui::{self, render_ui, sync_ui};
+use crate::util as utils;
 
 /// Side length (in chunks) of the flat voxel chunk grid.
 const CHUNK_GRID_SIZE: u32 = 4;
@@ -39,7 +47,9 @@ pub fn build_schedule() -> Schedule {
     schedule.set_executor_kind(ExecutorKind::SingleThreaded);
     schedule.add_systems(
         (
+            update_time,
             (fly_camera, orbit_light),
+            sync_ui,
             update_view_proj,
             (
                 upload_camera,
@@ -47,6 +57,9 @@ pub fn build_schedule() -> Schedule {
                 upload_skybox,
                 upload_voxel_settings,
                 upload_model_transforms,
+                animate,
+                update_selection_box,
+                render_ui,
             ),
             render,
         )
@@ -106,6 +119,9 @@ pub async fn build_world(window: Arc<Window>) -> anyhow::Result<World> {
     let device = &ctx.device;
     let mut world = World::new();
 
+    // Precompute the terrain heightmap once; chunk meshing and picking read it.
+    let heightmap = voxel::Heightmap::generate(CHUNK_GRID_SIZE);
+
     // --- Shared bind group layouts ---
     let camera_layout = uniform_layout(
         device,
@@ -128,11 +144,7 @@ pub async fn build_world(window: Arc<Window>) -> anyhow::Result<World> {
 
     // --- Camera entity ---
     let (cam_x, cam_z) = (16.0, 64.0);
-    let eye = Vec3::new(
-        cam_x,
-        voxel::terrain_surface_y(cam_x, cam_z, CHUNK_GRID_SIZE) + 1.7,
-        cam_z,
-    );
+    let eye = Vec3::new(cam_x, heightmap.surface_y(cam_x, cam_z) + 1.7, cam_z);
     let yaw = -std::f32::consts::FRAC_PI_2;
     let aspect = if ctx.config.height > 0 {
         ctx.config.width as f32 / ctx.config.height as f32
@@ -176,7 +188,8 @@ pub async fn build_world(window: Arc<Window>) -> anyhow::Result<World> {
         },
     ));
 
-    // --- Light entity ---
+    // --- Light entity --- (load the marker mesh now so we can bound it for picking)
+    let (obj_model, light_aabb) = assets::load_model("cube.obj", &ctx.device).await.unwrap();
     let light_uniform = LightUniform {
         position: glam::vec3(30.0, 40.0, 30.0),
         color: glam::vec3(1.0, 1.0, 1.0),
@@ -202,6 +215,9 @@ pub async fn build_world(window: Arc<Window>) -> anyhow::Result<World> {
         LightGpu {
             buffer: light_buffer,
             bind_group: light_bind_group,
+        },
+        Pickable {
+            local_aabb: light_aabb,
         },
     ));
 
@@ -265,7 +281,11 @@ pub async fn build_world(window: Arc<Window>) -> anyhow::Result<World> {
             wgpu::ShaderModuleDescriptor {
                 label: Some("Voxel Shader"),
                 source: wgpu::ShaderSource::Wgsl(
-                    concat!(include_str!("../common.wgsl"), include_str!("../voxel.wgsl")).into(),
+                    concat!(
+                        include_str!("../render/shaders/common.wgsl"),
+                        include_str!("../render/shaders/voxel.wgsl")
+                    )
+                    .into(),
                 ),
             },
         )
@@ -281,11 +301,15 @@ pub async fn build_world(window: Arc<Window>) -> anyhow::Result<World> {
             &layout,
             ctx.config.format,
             depth_format,
-            &[crate::model::ModelVertex::desc()],
+            &[model::ModelVertex::desc()],
             wgpu::ShaderModuleDescriptor {
                 label: Some("Light Shader"),
                 source: wgpu::ShaderSource::Wgsl(
-                    concat!(include_str!("../common.wgsl"), include_str!("../light.wgsl")).into(),
+                    concat!(
+                        include_str!("../render/shaders/common.wgsl"),
+                        include_str!("../render/shaders/light.wgsl")
+                    )
+                    .into(),
                 ),
             },
         )
@@ -310,7 +334,11 @@ pub async fn build_world(window: Arc<Window>) -> anyhow::Result<World> {
             wgpu::ShaderModuleDescriptor {
                 label: Some("glTF Shader"),
                 source: wgpu::ShaderSource::Wgsl(
-                    concat!(include_str!("../common.wgsl"), include_str!("../gltf.wgsl")).into(),
+                    concat!(
+                        include_str!("../render/shaders/common.wgsl"),
+                        include_str!("../render/shaders/gltf.wgsl")
+                    )
+                    .into(),
                 ),
             },
         )
@@ -327,22 +355,52 @@ pub async fn build_world(window: Arc<Window>) -> anyhow::Result<World> {
     .await?;
     let (fox_x, fox_z) = (16.0, 54.0);
     let fox_transform = Transform {
-        translation: Vec3::new(fox_x, voxel::terrain_surface_y(fox_x, fox_z, CHUNK_GRID_SIZE), fox_z),
+        translation: Vec3::new(fox_x, heightmap.surface_y(fox_x, fox_z), fox_z),
         rotation: glam::Quat::IDENTITY,
         scale: Vec3::splat(0.01),
     };
-    world.spawn((fox, fox_transform));
-
-    // --- Chunk entities ---
-    for chunk in voxel::generate_chunk_grid(&ctx.device, CHUNK_GRID_SIZE) {
-        world.spawn(chunk);
+    let fox_pickable = Pickable {
+        local_aabb: fox.local_aabb,
+    };
+    match fox.skin {
+        // Skinned: spawn with its animation data, defaulting to the Walk clip (1).
+        Some(skin) => {
+            world.spawn((
+                fox.model,
+                fox_transform,
+                skin,
+                AnimationPlayer {
+                    clip: 1,
+                    time: 0.0,
+                    speed: 1.0,
+                },
+                fox_pickable,
+            ));
+        }
+        None => {
+            world.spawn((fox.model, fox_transform, fox_pickable));
+        }
     }
+
+    // Chunk entities are spawned by the `generate_terrain` startup system (below).
 
     // --- Remaining singletons ---
     let depth_texture =
         texture::Texture::create_depth_texture(&ctx.device, &ctx.config, "depth_texture");
-    let obj_model = assets::load_model("cube.obj", &ctx.device).await.unwrap();
     let skybox = skybox::Skybox::new(&ctx.device, &ctx.queue, &ctx.config).await?;
+    let selection_box = create_selection_box(&ctx.device, ctx.config.format);
+
+    // --- Slint UI overlay (software-rendered). Sized to the surface; recreated
+    // on resize. The real size is set on the first resize when the surface is 0×0.
+    let ui_w = ctx.config.width.max(1);
+    let ui_h = ctx.config.height.max(1);
+    let slint_ui = ui::create_ui(ui_w, ui_h, ctx.window.scale_factor() as f32);
+    slint_ui
+        .component
+        .set_ao_enabled(voxel_settings.ao_enabled != 0);
+    slint_ui.component.set_animation_clip(1); // Walk
+    slint_ui.component.set_in_game(ui::SKIP_TITLE_SCREEN);
+    let ui_overlay = ui::create_overlay(&ctx.device, ctx.config.format, ui_w, ui_h);
 
     world.insert_resource(Pipelines {
         voxel: voxel_pipeline,
@@ -365,8 +423,22 @@ pub async fn build_world(window: Arc<Window>) -> anyhow::Result<World> {
         a: 1.0,
     }));
     world.insert_resource(ViewProj(cam_uniform.view_proj));
+    world.insert_resource(Time::default());
     world.insert_resource(Input::default());
+    world.insert_resource(Selected::default());
+    world.insert_resource(CursorPos::default());
+    world.insert_resource(selection_box);
+    world.insert_resource(ui_overlay);
+    world.insert_resource(heightmap);
+    world.insert_non_send_resource(slint_ui);
     world.insert_non_send_resource(ctx);
+
+    // Run terrain generation exactly once (it reads the heightmap + render context
+    // and spawns the chunk entities).
+    let mut startup = Schedule::default();
+    startup.set_executor_kind(ExecutorKind::SingleThreaded);
+    startup.add_systems(generate_terrain);
+    startup.run(&mut world);
 
     Ok(world)
 }

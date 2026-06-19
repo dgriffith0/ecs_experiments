@@ -9,11 +9,16 @@ use winit::{
     window::Window,
 };
 
-use crate::ecs::resources::{BackgroundColor, Input, VoxelSettingsRes};
-use crate::ecs::setup::{build_schedule, build_world};
+use crate::ecs::components::{AnimationPlayer, SkinnedMesh};
+use crate::ecs::resources::{CursorPos, Input, VoxelSettingsRes};
+use crate::ecs::world::{build_schedule, build_world};
+use crate::picking;
 use crate::render::context::RenderContext;
 use crate::render::draw::resize;
-use crate::utils::ColorFromXY;
+use crate::ui::{self, Ui};
+
+/// Logical width of the Slint side panel; clicks left of this go to the UI.
+const UI_PANEL_WIDTH: f32 = 260.0;
 
 /// The winit runner. Owns the ECS `World` and the per-frame `Schedule`, and
 /// translates window events into resource/world mutations.
@@ -62,21 +67,46 @@ impl ApplicationHandler for App {
             return;
         };
 
+        // Forward pointer events to the Slint UI (it ignores non-pointer events).
+        {
+            let mut slint_ui = world.non_send_resource_mut::<Ui>();
+            ui::forward_event(&mut slint_ui, &event);
+        }
+
+        // The title-screen Exit button quits the app.
+        if world
+            .non_send_resource::<Ui>()
+            .component
+            .get_exit_requested()
+        {
+            event_loop.exit();
+            return;
+        }
+
         match event {
             WindowEvent::CloseRequested => event_loop.exit(),
             WindowEvent::Resized(size) => resize(world, size.width, size.height),
             WindowEvent::RedrawRequested => self.schedule.run(world),
             WindowEvent::CursorMoved { position, .. } => {
-                let size = world
-                    .non_send_resource::<RenderContext>()
-                    .window
-                    .inner_size();
-                world.resource_mut::<BackgroundColor>().0 = wgpu::Color::from_xy(
-                    position.x,
-                    (0.0, size.width as f64),
-                    position.y,
-                    (0.0, size.height as f64),
-                );
+                let mut cursor = world.resource_mut::<CursorPos>();
+                cursor.0 = position.x as f32;
+                cursor.1 = position.y as f32;
+            }
+            WindowEvent::MouseInput {
+                state: ElementState::Pressed,
+                button: MouseButton::Left,
+                ..
+            } => {
+                // Pick only in-game, and only when the click is in the viewport
+                // (not over the HUD panel).
+                let (scale, in_game) = {
+                    let ui = world.non_send_resource::<Ui>();
+                    (ui.scale, ui.component.get_in_game())
+                };
+                let logical_x = world.resource::<CursorPos>().0 / scale;
+                if in_game && logical_x > UI_PANEL_WIDTH {
+                    picking::pick_at(world);
+                }
             }
             WindowEvent::KeyboardInput {
                 event:
@@ -98,6 +128,21 @@ fn handle_key(world: &mut World, event_loop: &ActiveEventLoop, code: KeyCode, pr
     } else if code == KeyCode::KeyO && pressed {
         // Toggle ambient occlusion; `upload_voxel_settings` re-uploads on change.
         world.resource_mut::<VoxelSettingsRes>().0.toggle();
+    } else if pressed && matches!(code, KeyCode::Digit1 | KeyCode::Digit2 | KeyCode::Digit3) {
+        // Switch the animation clip (Survey / Walk / Run) on every player.
+        let clip = match code {
+            KeyCode::Digit1 => 0,
+            KeyCode::Digit2 => 1,
+            _ => 2,
+        };
+        let mut q = world.query::<(&mut AnimationPlayer, &SkinnedMesh)>();
+        for (mut player, skin) in q.iter_mut(world) {
+            if let Some(c) = skin.clips.get(clip) {
+                player.clip = clip;
+                player.time = 0.0;
+                println!("playing animation: {}", c.name);
+            }
+        }
     } else {
         world.resource_mut::<Input>().set(code, pressed);
     }

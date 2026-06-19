@@ -1,18 +1,11 @@
-//! Per-frame systems: simulate (fly camera, orbit light), then upload GPU
-//! buffers. The render system lives in `crate::render::draw`.
-
 use bevy_ecs::prelude::*;
-use glam::{Quat, Vec3};
+use glam::Vec3;
 
-use crate::camera::{self, CameraUniform};
-use crate::ecs::components::{Camera, CameraGpu, FlyController, LightGpu, PointLight, Transform};
-use crate::ecs::resources::{Input, SkyboxRes, ViewProj, VoxelGpu, VoxelSettingsRes};
-use crate::gltf_model::GltfModel;
-use crate::light::LightUniform;
+use crate::ecs::components::{Camera, CameraGpu, FlyController, Transform};
+use crate::ecs::resources::{Input, ViewProj};
 use crate::render::context::RenderContext;
-use crate::utils::uniform_bytes;
-
-// --- Sim ---
+use crate::scene::camera::{self, CameraUniform};
+use crate::util::uniform_bytes;
 
 /// Apply held input to the camera entity: arrow keys rotate yaw/pitch, WASD +
 /// Space/Shift move along the look/strafe axes (strafe stays horizontal).
@@ -62,16 +55,6 @@ pub fn fly_camera(
     }
 }
 
-/// Orbit every point light 1° around the world +Y axis each frame.
-pub fn orbit_light(mut q: Query<&mut Transform, With<PointLight>>) {
-    let rotation = Quat::from_axis_angle(Vec3::Y, 1f32.to_radians());
-    for mut transform in &mut q {
-        transform.translation = rotation * transform.translation;
-    }
-}
-
-// --- Upload ---
-
 /// Recompute the camera's view-projection from its transform + controller.
 pub fn update_view_proj(
     mut view_proj: ResMut<ViewProj>,
@@ -106,49 +89,4 @@ pub fn upload_camera(
     };
     ctx.queue
         .write_buffer(&gpu.buffer, 0, &uniform_bytes(&uniform));
-}
-
-/// Write each light's uniform (position from its transform + color).
-pub fn upload_light(ctx: NonSend<RenderContext>, q: Query<(&Transform, &PointLight, &LightGpu)>) {
-    for (transform, light, gpu) in &q {
-        let uniform = LightUniform {
-            position: transform.translation,
-            color: light.color,
-        };
-        ctx.queue
-            .write_buffer(&gpu.buffer, 0, &uniform_bytes(&uniform));
-    }
-}
-
-/// Keep the sky oriented with the camera (it samples by view direction).
-pub fn upload_skybox(
-    ctx: NonSend<RenderContext>,
-    view_proj: Res<ViewProj>,
-    skybox: Res<SkyboxRes>,
-) {
-    skybox.0.update(&ctx.queue, view_proj.0);
-}
-
-/// Write each glTF model's transform matrix to its uniform, only when the
-/// entity's `Transform` changes (newly-spawned entities count as changed).
-pub fn upload_model_transforms(
-    ctx: NonSend<RenderContext>,
-    q: Query<(&Transform, &GltfModel), Changed<Transform>>,
-) {
-    for (transform, model) in &q {
-        ctx.queue
-            .write_buffer(&model.model_buffer, 0, &uniform_bytes(&transform.matrix()));
-    }
-}
-
-/// Re-upload the voxel settings (AO flag) only when they change.
-pub fn upload_voxel_settings(
-    ctx: NonSend<RenderContext>,
-    settings: Res<VoxelSettingsRes>,
-    gpu: Res<VoxelGpu>,
-) {
-    if settings.is_changed() {
-        ctx.queue
-            .write_buffer(&gpu.settings_buffer, 0, &uniform_bytes(&settings.0));
-    }
 }

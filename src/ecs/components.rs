@@ -3,11 +3,14 @@
 //! Spatial entities (the camera, the light, every chunk, every glTF model) carry
 //! a [`Transform`]; the camera and light additionally carry their GPU mirror
 //! (`CameraGpu` / `LightGpu`) so the render system can fetch their bind groups by
-//! query. The mesh components ([`crate::voxel::VoxelChunk`],
-//! [`crate::gltf_model::GltfModel`]) derive `Component` in their own modules.
+//! query. The mesh components ([`crate::scene::terrain::VoxelChunk`],
+//! [`crate::scene::gltf_model::GltfModel`]) derive `Component` in their own modules.
 
 use bevy_ecs::prelude::Component;
 use glam::{Mat4, Quat, Vec3};
+
+use crate::picking::Aabb;
+use crate::scene::animation::{AnimationClip, Skeleton};
 
 /// Position / orientation / scale of an entity in world space.
 #[derive(Component, Clone, Copy)]
@@ -68,4 +71,35 @@ pub struct CameraGpu {
 pub struct LightGpu {
     pub buffer: wgpu::Buffer,
     pub bind_group: wgpu::BindGroup,
+}
+
+/// CPU skinning data for an animated glTF mesh: the bind-pose attributes, the
+/// skeleton, and the animation clips. The `animate` system blends `base_positions`
+/// each frame and re-uploads the entity's `GltfModel::vertex_buffer`.
+#[derive(Component)]
+pub struct SkinnedMesh {
+    pub base_positions: Vec<Vec3>,
+    pub tex_coords: Vec<[f32; 2]>,
+    pub joints: Vec<[u16; 4]>,
+    pub weights: Vec<[f32; 4]>,
+    pub skeleton: Skeleton,
+    pub clips: Vec<AnimationClip>,
+}
+
+/// A clickable scene object: its local-space bounding box (transformed by
+/// `Transform` for ray tests). Terrain is picked at voxel granularity instead.
+#[derive(Component)]
+pub struct Pickable {
+    pub local_aabb: Aabb,
+}
+
+/// Animation playback state for a [`SkinnedMesh`] entity.
+#[derive(Component)]
+pub struct AnimationPlayer {
+    /// Index into `SkinnedMesh::clips`.
+    pub clip: usize,
+    /// Current playback time in seconds (wraps at the clip duration).
+    pub time: f32,
+    /// Playback rate multiplier.
+    pub speed: f32,
 }
