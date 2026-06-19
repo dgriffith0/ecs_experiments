@@ -22,6 +22,7 @@ impl Trs {
 /// A skeleton: joints in skin order, each with a parent joint index (within the
 /// joint set, or `None` for a root), a base local transform, and an inverse bind
 /// matrix.
+#[derive(Clone)]
 pub struct Skeleton {
     pub parents: Vec<Option<usize>>,
     pub locals: Vec<Trs>,
@@ -29,17 +30,20 @@ pub struct Skeleton {
 }
 
 /// Keyframe data for one animated channel (one joint, one property). LINEAR.
+#[derive(Clone)]
 pub enum ChannelData {
     Translation { times: Vec<f32>, values: Vec<Vec3> },
     Rotation { times: Vec<f32>, values: Vec<Quat> },
     Scale { times: Vec<f32>, values: Vec<Vec3> },
 }
 
+#[derive(Clone)]
 pub struct Channel {
     pub joint: usize,
     pub data: ChannelData,
 }
 
+#[derive(Clone)]
 pub struct AnimationClip {
     pub name: String,
     pub duration: f32,

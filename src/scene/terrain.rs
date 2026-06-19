@@ -55,7 +55,12 @@ pub struct TerrainParams {
     pub peakiness: f64,
     /// Probabilistic block-layer dithering width (`0` = hard strata lines).
     pub layer_blend: f64,
+    /// How many foxes to scatter across the surface; clamped to `[0, MAX_FOXES]`.
+    pub fox_count: u32,
 }
+
+/// Most foxes the generator allows.
+pub const MAX_FOXES: u32 = 64;
 
 impl Default for TerrainParams {
     /// Reproduces the original world: `Fbm::new(42)` defaults + a `×0.03` scale.
@@ -71,6 +76,7 @@ impl Default for TerrainParams {
             flatness: 0.6,
             peakiness: 0.6,
             layer_blend: 0.12,
+            fox_count: 5,
         }
     }
 }
@@ -86,6 +92,7 @@ impl TerrainParams {
             flatness: self.flatness.clamp(0.0, 1.0),
             peakiness: self.peakiness.clamp(0.0, 1.0),
             layer_blend: self.layer_blend.clamp(0.0, 0.35),
+            fox_count: self.fox_count.min(MAX_FOXES),
             ..*self
         }
     }
@@ -202,6 +209,29 @@ impl Heightmap {
         let gx = ((world_x + half) / VOXEL_SIZE).round() as i64;
         let gz = ((world_z + half + GRID_Z_PUSH) / VOXEL_SIZE).round() as i64;
         self.height(gx, gz) as f32 * VOXEL_SIZE + TERRAIN_BASE_Y
+    }
+
+    /// The parameters this world was built with.
+    pub fn params(&self) -> &TerrainParams {
+        &self.params
+    }
+
+    /// `count` deterministic surface points scattered across the world (seeded by
+    /// the world seed, so the same world always places them identically). Used to
+    /// spawn entities like foxes on valid ground within the grid.
+    pub fn scatter_surface(&self, count: u32) -> Vec<Vec3> {
+        const MARGIN: f32 = 3.0;
+        let (cx, cz) = world_center_xz(self.grid);
+        let half = world_span(self.grid) / 2.0;
+        let (x0, x1) = (cx - half + MARGIN, cx + half - MARGIN);
+        let (z0, z1) = (cz - half + MARGIN, cz + half - MARGIN);
+        (0..count)
+            .map(|i| {
+                let x = x0 + (x1 - x0) * hash01(i as i64, 0, 1, self.params.seed);
+                let z = z0 + (z1 - z0) * hash01(i as i64, 0, 2, self.params.seed);
+                Vec3::new(x, self.surface_y(x, z), z)
+            })
+            .collect()
     }
 }
 
@@ -382,7 +412,7 @@ const LAYER_BANDS: [(u32, f32); 4] = [(2, 0.12), (0, 0.38), (1, 0.63), (3, 0.88)
 
 /// Deterministic per-voxel value in `[0, 1)` from its global coords + seed. A hash
 /// (not RNG) so a given world is reproducible and dithers differently per seed.
-fn hash01(gx: i64, gy: i64, gz: i64, seed: u32) -> f32 {
+pub fn hash01(gx: i64, gy: i64, gz: i64, seed: u32) -> f32 {
     let mut h = seed as u64 ^ 0x9E3779B97F4A7C15;
     for v in [gx as u64, gy as u64, gz as u64] {
         h ^= v.wrapping_mul(0xD1B54A32D192ED03);

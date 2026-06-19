@@ -1,8 +1,10 @@
 use bevy_ecs::prelude::*;
-use glam::Vec3;
+use glam::{Quat, Vec3};
 
-use crate::ecs::components::{FlyController, SkinnedMesh, Transform};
+use crate::assets::GltfTemplate;
+use crate::ecs::components::{AnimationPlayer, FlyController, Pickable, SkinnedMesh, Transform};
 use crate::render::context::RenderContext;
+use crate::scene::gltf_model::GltfModel;
 use crate::scene::terrain::{self, Heightmap, TerrainParams, VoxelChunk};
 use crate::ui::Ui;
 
@@ -17,9 +19,52 @@ pub fn generate_terrain(
     }
 }
 
+type FoxBundle = (GltfModel, Transform, SkinnedMesh, AnimationPlayer, Pickable);
+
+/// Build `heightmap.params().fox_count` fox instances scattered across valid
+/// surface points, each with a deterministic (seeded) random facing + animation
+/// phase so they don't move in lockstep. Empty if the template carries no skin.
+pub fn fox_bundles(
+    device: &wgpu::Device,
+    template: &GltfTemplate,
+    heightmap: &Heightmap,
+) -> Vec<FoxBundle> {
+    let Some(skin) = &template.skin else {
+        return Vec::new();
+    };
+    let p = heightmap.params();
+    heightmap
+        .scatter_surface(p.fox_count)
+        .into_iter()
+        .enumerate()
+        .map(|(i, pos)| {
+            let yaw = terrain::hash01(i as i64, 7, 7, p.seed) * std::f32::consts::TAU;
+            let phase = terrain::hash01(i as i64, 9, 9, p.seed) * 2.0;
+            let transform = Transform {
+                translation: pos,
+                rotation: Quat::from_rotation_y(yaw),
+                scale: Vec3::splat(0.01),
+            };
+            (
+                template.instantiate(device),
+                transform,
+                skin.clone(),
+                AnimationPlayer {
+                    clip: 1, // Walk
+                    time: phase,
+                    speed: 1.0,
+                },
+                Pickable {
+                    local_aabb: template.local_aabb,
+                },
+            )
+        })
+        .collect()
+}
+
 /// Rebuild the world from the terrain-generator sliders: re-sample the heightmap,
-/// replace the chunk meshes, and re-frame the preview camera + fox. Triggered by
-/// the generator's "Regenerate" button (and on entering that screen).
+/// replace the chunk meshes, re-scatter the foxes, and re-frame the preview
+/// camera. Triggered by the generator's "Regenerate" button (and on entering it).
 pub fn regenerate_terrain(world: &mut World) {
     // Read the slider values off the Slint component.
     let params = {
@@ -35,6 +80,7 @@ pub fn regenerate_terrain(world: &mut World) {
             flatness: c.get_gen_flatness() as f64,
             peakiness: c.get_gen_peakiness() as f64,
             layer_blend: c.get_gen_layer_blend() as f64,
+            fox_count: c.get_gen_fox_count().round() as u32,
         }
     };
     let heightmap = Heightmap::generate(&params);
@@ -53,6 +99,23 @@ pub fn regenerate_terrain(world: &mut World) {
     };
     for chunk in chunks {
         world.spawn(chunk);
+    }
+
+    // Replace the foxes: despawn the old ones, scatter a fresh set on the surface.
+    let old_foxes: Vec<Entity> = world
+        .query_filtered::<Entity, With<SkinnedMesh>>()
+        .iter(world)
+        .collect();
+    for e in old_foxes {
+        world.despawn(e);
+    }
+    let foxes = {
+        let device = &world.non_send_resource::<RenderContext>().device;
+        let template = world.resource::<GltfTemplate>();
+        fox_bundles(device, template, &heightmap)
+    };
+    for fox in foxes {
+        world.spawn(fox);
     }
 
     // Re-frame the camera to an overview looking at the world centre.
@@ -75,16 +138,6 @@ pub fn regenerate_terrain(world: &mut World) {
         t.translation = cam;
         fly.yaw = yaw;
         fly.pitch = pitch;
-    }
-
-    // Sit the fox on the new surface at the world centre.
-    let fox_pos = Vec3::new(cx, heightmap.surface_y(cx, cz), cz);
-    if let Some(mut t) = world
-        .query_filtered::<&mut Transform, With<SkinnedMesh>>()
-        .iter_mut(world)
-        .next()
-    {
-        t.translation = fox_pos;
     }
 
     world.insert_resource(heightmap);

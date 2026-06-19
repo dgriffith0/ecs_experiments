@@ -12,12 +12,71 @@ use crate::scene::gltf_model::{GltfModel, GltfVertex};
 use crate::scene::model;
 use crate::util as utils;
 
-/// Result of loading a glTF: the GPU model, plus optional CPU skin + animation
-/// data when the file is skinned, and the mesh's local-space bounding box.
-pub struct LoadedGltf {
-    pub model: GltfModel,
+/// A parsed glTF kept on the CPU so many GPU instances can be spawned from it
+/// without re-reading the file: geometry + decoded texture + the bind-group
+/// layouts needed to build per-instance bind groups, plus optional skin data.
+#[derive(bevy_ecs::prelude::Resource)]
+pub struct GltfTemplate {
+    vertices: Vec<GltfVertex>,
+    indices: Vec<u32>,
+    texture: texture::Texture,
+    texture_layout: wgpu::BindGroupLayout,
+    model_layout: wgpu::BindGroupLayout,
     pub skin: Option<SkinnedMesh>,
     pub local_aabb: Aabb,
+}
+
+impl GltfTemplate {
+    /// Build a fresh GPU instance: its own `COPY_DST` vertex buffer (so the
+    /// `animate` system can re-skin it each frame) and transform uniform; the
+    /// index buffer and texture bind group are rebuilt cheaply from shared data.
+    pub fn instantiate(&self, device: &wgpu::Device) -> GltfModel {
+        let vertex_buffer = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
+            label: Some("gltf instance vertex buffer"),
+            contents: bytemuck::cast_slice(&self.vertices),
+            usage: wgpu::BufferUsages::VERTEX | wgpu::BufferUsages::COPY_DST,
+        });
+        let index_buffer = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
+            label: Some("gltf instance index buffer"),
+            contents: bytemuck::cast_slice(&self.indices),
+            usage: wgpu::BufferUsages::INDEX,
+        });
+        let texture_bind_group = device.create_bind_group(&wgpu::BindGroupDescriptor {
+            layout: &self.texture_layout,
+            entries: &[
+                wgpu::BindGroupEntry {
+                    binding: 0,
+                    resource: wgpu::BindingResource::TextureView(&self.texture.view),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 1,
+                    resource: wgpu::BindingResource::Sampler(&self.texture.sampler),
+                },
+            ],
+            label: Some("gltf_texture_bind_group"),
+        });
+        let model_buffer = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
+            label: Some("gltf instance model buffer"),
+            contents: &utils::uniform_bytes(&glam::Mat4::IDENTITY),
+            usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
+        });
+        let model_bind_group = device.create_bind_group(&wgpu::BindGroupDescriptor {
+            layout: &self.model_layout,
+            entries: &[wgpu::BindGroupEntry {
+                binding: 0,
+                resource: model_buffer.as_entire_binding(),
+            }],
+            label: Some("gltf_model_bind_group"),
+        });
+        GltfModel {
+            vertex_buffer,
+            index_buffer,
+            num_indices: self.indices.len() as u32,
+            texture_bind_group,
+            model_bind_group,
+            model_buffer,
+        }
+    }
 }
 
 pub async fn load_string(file_name: &str) -> anyhow::Result<String> {
@@ -149,13 +208,13 @@ pub async fn load_model(
 /// If the file is skinned, also parses the skeleton + animation clips into a
 /// [`SkinnedMesh`] (the vertex buffer is then `COPY_DST` so it can be re-skinned
 /// each frame). Normals are ignored — `gltf.wgsl` derives flat normals.
-pub async fn load_glb(
+pub async fn load_gltf_template(
     file_name: &str,
     device: &wgpu::Device,
     queue: &wgpu::Queue,
     texture_layout: &wgpu::BindGroupLayout,
     model_layout: &wgpu::BindGroupLayout,
-) -> anyhow::Result<LoadedGltf> {
+) -> anyhow::Result<GltfTemplate> {
     let bytes = load_binary(file_name).await?;
     let (document, buffers, images) = gltf::import_slice(&bytes)?;
 
@@ -192,18 +251,6 @@ pub async fn load_glb(
         None => (0..vertices.len() as u32).collect(),
     };
 
-    let vertex_buffer = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
-        label: Some(&format!("{file_name} Vertex Buffer")),
-        contents: bytemuck::cast_slice(&vertices),
-        // COPY_DST so `animate` can re-upload CPU-skinned positions each frame.
-        usage: wgpu::BufferUsages::VERTEX | wgpu::BufferUsages::COPY_DST,
-    });
-    let index_buffer = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
-        label: Some(&format!("{file_name} Index Buffer")),
-        contents: bytemuck::cast_slice(&indices),
-        usage: wgpu::BufferUsages::INDEX,
-    });
-
     // Decode the base-color texture to RGBA8 (the Fox's image is RGB PNG).
     let base_color = primitive
         .material()
@@ -222,37 +269,6 @@ pub async fn load_glb(
     };
     let texture =
         texture::Texture::from_rgba8(device, queue, image.width, image.height, &rgba, Some(file_name))?;
-
-    let texture_bind_group = device.create_bind_group(&wgpu::BindGroupDescriptor {
-        layout: texture_layout,
-        entries: &[
-            wgpu::BindGroupEntry {
-                binding: 0,
-                resource: wgpu::BindingResource::TextureView(&texture.view),
-            },
-            wgpu::BindGroupEntry {
-                binding: 1,
-                resource: wgpu::BindingResource::Sampler(&texture.sampler),
-            },
-        ],
-        label: Some("gltf_texture_bind_group"),
-    });
-
-    // Per-model transform uniform (group 3), written each frame from the
-    // entity's `Transform` by `upload_model_transforms` — init to identity.
-    let model_buffer = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
-        label: Some(&format!("{file_name} Model Buffer")),
-        contents: &utils::uniform_bytes(&glam::Mat4::IDENTITY),
-        usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
-    });
-    let model_bind_group = device.create_bind_group(&wgpu::BindGroupDescriptor {
-        layout: model_layout,
-        entries: &[wgpu::BindGroupEntry {
-            binding: 0,
-            resource: model_buffer.as_entire_binding(),
-        }],
-        label: Some("gltf_model_bind_group"),
-    });
 
     // If the file is skinned, parse the skeleton + clips and keep the CPU data
     // needed to re-skin the mesh each frame.
@@ -283,15 +299,12 @@ pub async fn load_glb(
 
     let local_aabb = Aabb::from_points(positions.iter().map(|p| Vec3::from_array(*p)));
 
-    Ok(LoadedGltf {
-        model: GltfModel {
-            vertex_buffer,
-            index_buffer,
-            num_indices: indices.len() as u32,
-            texture_bind_group,
-            model_bind_group,
-            model_buffer,
-        },
+    Ok(GltfTemplate {
+        vertices,
+        indices,
+        texture,
+        texture_layout: texture_layout.clone(),
+        model_layout: model_layout.clone(),
         skin,
         local_aabb,
     })

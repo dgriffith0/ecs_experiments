@@ -13,16 +13,16 @@ use winit::window::Window;
 
 use crate::scene::camera::{self, CameraUniform};
 use crate::ecs::components::{
-    AnimationPlayer, Camera, CameraGpu, FlyController, LightGpu, Pickable, PointLight, Transform,
+    Camera, CameraGpu, FlyController, LightGpu, Pickable, PointLight, Transform,
 };
 use crate::ecs::resources::{
     BackgroundColor, CursorPos, DepthTexture, Input, LightMarker, Pipelines, Selected, SkyboxRes,
     Time, ViewProj, VoxelGpu, VoxelSettingsRes,
 };
 use crate::ecs::systems::{
-    animate, fly_camera, generate_terrain, orbit_light, update_selection_box, update_time,
-    update_view_proj, upload_camera, upload_light, upload_model_transforms, upload_skybox,
-    upload_voxel_settings,
+    animate, fly_camera, fox_bundles, generate_terrain, orbit_light, update_selection_box,
+    update_time, update_view_proj, upload_camera, upload_light, upload_model_transforms,
+    upload_skybox, upload_voxel_settings,
 };
 use crate::assets;
 use crate::render::context::RenderContext;
@@ -342,8 +342,9 @@ pub async fn build_world(window: Arc<Window>) -> anyhow::Result<World> {
         )
     };
 
-    // --- glTF model entities (transform lives on the entity, uploaded each frame) ---
-    let fox = assets::load_glb(
+    // --- Foxes: scatter `fox_count` instances across the surface, built from a
+    // shared template kept as a resource so regeneration can re-spawn them. ---
+    let fox_template = assets::load_gltf_template(
         "fox.glb",
         &ctx.device,
         &ctx.queue,
@@ -351,34 +352,10 @@ pub async fn build_world(window: Arc<Window>) -> anyhow::Result<World> {
         &gltf_model_layout,
     )
     .await?;
-    let (fox_x, fox_z) = (16.0, 54.0);
-    let fox_transform = Transform {
-        translation: Vec3::new(fox_x, heightmap.surface_y(fox_x, fox_z), fox_z),
-        rotation: glam::Quat::IDENTITY,
-        scale: Vec3::splat(0.01),
-    };
-    let fox_pickable = Pickable {
-        local_aabb: fox.local_aabb,
-    };
-    match fox.skin {
-        // Skinned: spawn with its animation data, defaulting to the Walk clip (1).
-        Some(skin) => {
-            world.spawn((
-                fox.model,
-                fox_transform,
-                skin,
-                AnimationPlayer {
-                    clip: 1,
-                    time: 0.0,
-                    speed: 1.0,
-                },
-                fox_pickable,
-            ));
-        }
-        None => {
-            world.spawn((fox.model, fox_transform, fox_pickable));
-        }
+    for fox in fox_bundles(&ctx.device, &fox_template, &heightmap) {
+        world.spawn(fox);
     }
+    world.insert_resource(fox_template);
 
     // Chunk entities are spawned by the `generate_terrain` startup system (below).
 
@@ -410,6 +387,7 @@ pub async fn build_world(window: Arc<Window>) -> anyhow::Result<World> {
     c.set_gen_flatness(terrain_params.flatness as f32);
     c.set_gen_peakiness(terrain_params.peakiness as f32);
     c.set_gen_layer_blend(terrain_params.layer_blend as f32);
+    c.set_gen_fox_count(terrain_params.fox_count as f32);
     let ui_overlay = ui::create_overlay(&ctx.device, ctx.config.format, ui_w, ui_h);
 
     world.insert_resource(Pipelines {

@@ -76,7 +76,7 @@ pub struct LightGpu {
 /// CPU skinning data for an animated glTF mesh: the bind-pose attributes, the
 /// skeleton, and the animation clips. The `animate` system blends `base_positions`
 /// each frame and re-uploads the entity's `GltfModel::vertex_buffer`.
-#[derive(Component)]
+#[derive(Component, Clone)]
 pub struct SkinnedMesh {
     pub base_positions: Vec<Vec3>,
     pub tex_coords: Vec<[f32; 2]>,
