@@ -191,6 +191,27 @@ impl Heightmap {
         self.grid
     }
 
+    /// Columns per side (`grid * CHUNK`).
+    pub fn extent(&self) -> u32 {
+        self.extent
+    }
+
+    /// World-space centre of the top face of the column at global voxel coords
+    /// `(gx, gz)`. The voxel cube spans `[gx·VS − half, gx·VS − half + VS]`, so the
+    /// centre is half a voxel past the grid line — standing an entity here keeps it
+    /// centred on the block instead of overhanging the edge.
+    pub fn cell_center(&self, gx: i64, gz: i64) -> Vec3 {
+        let half = grid_half(self.grid);
+        let mid = VOXEL_SIZE * 0.5;
+        let x = gx as f32 * VOXEL_SIZE - half + mid;
+        let z = gz as f32 * VOXEL_SIZE - half - GRID_Z_PUSH + mid;
+        Vec3::new(
+            x,
+            self.height(gx, gz) as f32 * VOXEL_SIZE + TERRAIN_BASE_Y,
+            z,
+        )
+    }
+
     /// Solid-voxel height of the column at global voxel coords `(gx, gz)`.
     /// Columns outside the grid report `MIN_TERRAIN_HEIGHT`.
     pub fn height(&self, gx: i64, gz: i64) -> u32 {
@@ -214,6 +235,16 @@ impl Heightmap {
     /// The parameters this world was built with.
     pub fn params(&self) -> &TerrainParams {
         &self.params
+    }
+
+    /// Grid cell `(gx, gz)` whose voxel cube contains world `(x, z)`, clamped into
+    /// the grid. Uses `floor` to match the cube spans in [`cell_center`].
+    pub fn cell_coords(&self, world_x: f32, world_z: f32) -> (usize, usize) {
+        let half = grid_half(self.grid);
+        let max = self.extent as i64 - 1;
+        let gx = (((world_x + half) / VOXEL_SIZE).floor() as i64).clamp(0, max);
+        let gz = (((world_z + half + GRID_Z_PUSH) / VOXEL_SIZE).floor() as i64).clamp(0, max);
+        (gx as usize, gz as usize)
     }
 
     /// `count` deterministic surface points scattered across the world (seeded by

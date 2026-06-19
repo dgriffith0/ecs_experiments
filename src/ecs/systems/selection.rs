@@ -2,7 +2,7 @@ use bevy_ecs::prelude::*;
 use glam::{Mat4, Vec4};
 
 use crate::ecs::components::{Pickable, Transform};
-use crate::ecs::resources::{Selected, SelectionBox, ViewProj};
+use crate::ecs::resources::{NavOverlay, Selected, SelectionBox, ViewProj};
 use crate::render::context::RenderContext;
 use crate::render::pipeline::SelUniform;
 use crate::util::uniform_bytes;
@@ -42,4 +42,22 @@ pub fn update_selection_box(
     ctx.queue
         .write_buffer(&sel_box.uniform, 0, &uniform_bytes(&uniform));
     sel_box.visible = true;
+}
+
+/// Keep the nav-mesh overlay's transform uniform current (its lines are in world
+/// space, so the MVP is just the view-projection). Only runs when visible.
+pub fn upload_nav_overlay(
+    ctx: NonSend<RenderContext>,
+    view_proj: Res<ViewProj>,
+    nav: Res<NavOverlay>,
+) {
+    if !nav.visible {
+        return;
+    }
+    let uniform = SelUniform {
+        mvp: view_proj.0,
+        color: Vec4::new(0.2, 1.0, 0.4, 1.0),
+    };
+    ctx.queue
+        .write_buffer(&nav.uniform, 0, &uniform_bytes(&uniform));
 }

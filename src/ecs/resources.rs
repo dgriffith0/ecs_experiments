@@ -90,6 +90,18 @@ pub struct SelectionBox {
     pub visible: bool,
 }
 
+/// Debug overlay for the navigation mesh: a line list of walkable cell-to-cell
+/// links, drawn on top of the scene (toggle with `N`). Rebuilt with the terrain.
+#[derive(Resource)]
+pub struct NavOverlay {
+    pub pipeline: wgpu::RenderPipeline,
+    pub uniform: wgpu::Buffer,
+    pub bind_group: wgpu::BindGroup,
+    pub lines: wgpu::Buffer,
+    pub num_vertices: u32,
+    pub visible: bool,
+}
+
 /// Held-key state for the free-fly camera, fed by winit keyboard events.
 #[derive(Resource, Default)]
 pub struct Input {

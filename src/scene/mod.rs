@@ -6,5 +6,6 @@ pub mod camera;
 pub mod gltf_model;
 pub mod light;
 pub mod model;
+pub mod nav;
 pub mod skybox;
 pub mod terrain;

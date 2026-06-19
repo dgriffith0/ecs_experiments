@@ -8,7 +8,8 @@ use bevy_ecs::system::SystemState;
 
 use crate::ecs::components::{Camera, CameraGpu, LightGpu};
 use crate::ecs::resources::{
-    BackgroundColor, DepthTexture, LightMarker, Pipelines, SelectionBox, SkyboxRes, VoxelGpu,
+    BackgroundColor, DepthTexture, LightMarker, NavOverlay, Pipelines, SelectionBox, SkyboxRes,
+    VoxelGpu,
 };
 use crate::render::context::RenderContext;
 use crate::render::texture;
@@ -95,6 +96,7 @@ pub fn render(world: &mut World) {
         Res<LightMarker>,
         Res<UiOverlay>,
         Res<SelectionBox>,
+        Res<NavOverlay>,
         NonSend<Ui>,
         Query<&CameraGpu>,
         Query<&LightGpu>,
@@ -111,6 +113,7 @@ pub fn render(world: &mut World) {
         marker,
         ui_overlay,
         sel_box,
+        nav_overlay,
         ui,
         cam_q,
         light_q,
@@ -222,6 +225,14 @@ pub fn render(world: &mut World) {
                 render_pass.set_bind_group(0, &sel_box.bind_group, &[]);
                 render_pass.set_vertex_buffer(0, sel_box.edges.slice(..));
                 render_pass.draw(0..24, 0..1);
+            }
+
+            // Nav-mesh debug overlay (walkable cell links), toggled with `N`.
+            if nav_overlay.visible && nav_overlay.num_vertices > 0 {
+                render_pass.set_pipeline(&nav_overlay.pipeline);
+                render_pass.set_bind_group(0, &nav_overlay.bind_group, &[]);
+                render_pass.set_vertex_buffer(0, nav_overlay.lines.slice(..));
+                render_pass.draw(0..nav_overlay.num_vertices, 0..1);
             }
         }
 

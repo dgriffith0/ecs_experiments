@@ -10,7 +10,7 @@ use winit::{
 };
 
 use crate::ecs::components::{AnimationPlayer, SkinnedMesh};
-use crate::ecs::resources::{CursorPos, Input, VoxelSettingsRes};
+use crate::ecs::resources::{CursorPos, Input, NavOverlay, VoxelSettingsRes};
 use crate::ecs::systems::regenerate_terrain;
 use crate::ecs::world::{build_schedule, build_world};
 use crate::picking;
@@ -143,6 +143,10 @@ fn handle_key(world: &mut World, event_loop: &ActiveEventLoop, code: KeyCode, pr
     } else if code == KeyCode::KeyO && pressed {
         // Toggle ambient occlusion; `upload_voxel_settings` re-uploads on change.
         world.resource_mut::<VoxelSettingsRes>().0.toggle();
+    } else if code == KeyCode::KeyN && pressed {
+        // Toggle the navigation-mesh debug overlay.
+        let mut nav = world.resource_mut::<NavOverlay>();
+        nav.visible = !nav.visible;
     } else if pressed && matches!(code, KeyCode::Digit1 | KeyCode::Digit2 | KeyCode::Digit3) {
         // Switch the animation clip (Survey / Walk / Run) on every player.
         let clip = match code {

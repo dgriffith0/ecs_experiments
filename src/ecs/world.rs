@@ -21,17 +21,19 @@ use crate::ecs::resources::{
 };
 use crate::ecs::systems::{
     animate, fly_camera, fox_bundles, generate_terrain, orbit_light, update_selection_box,
+    upload_nav_overlay, wander_foxes,
     update_time, update_view_proj, upload_camera, upload_light, upload_model_transforms,
     upload_skybox, upload_voxel_settings,
 };
 use crate::assets;
 use crate::render::context::RenderContext;
 use crate::render::draw::render;
-use crate::render::pipeline::{create_render_pipeline, create_selection_box};
+use crate::render::pipeline::{create_nav_overlay, create_render_pipeline, create_selection_box};
 use crate::render::texture;
 use crate::scene::gltf_model;
 use crate::scene::light::LightUniform;
 use crate::scene::model::{self, Vertex};
+use crate::scene::nav::NavMesh;
 use crate::scene::skybox;
 use crate::scene::terrain::{self as voxel, VoxelSettings};
 use crate::ui::{self, render_ui, sync_ui};
@@ -45,7 +47,7 @@ pub fn build_schedule() -> Schedule {
     schedule.add_systems(
         (
             update_time,
-            (fly_camera, orbit_light),
+            (fly_camera, orbit_light, wander_foxes),
             sync_ui,
             update_view_proj,
             (
@@ -56,6 +58,7 @@ pub fn build_schedule() -> Schedule {
                 upload_model_transforms,
                 animate,
                 update_selection_box,
+                upload_nav_overlay,
                 render_ui,
             ),
             render,
@@ -365,6 +368,10 @@ pub async fn build_world(window: Arc<Window>) -> anyhow::Result<World> {
     let skybox = skybox::Skybox::new(&ctx.device, &ctx.queue, &ctx.config).await?;
     let selection_box = create_selection_box(&ctx.device, ctx.config.format);
 
+    // Navigation mesh (walkable grid from the heightmap) + its debug overlay.
+    let nav_mesh = NavMesh::build(&heightmap);
+    let nav_overlay = create_nav_overlay(&ctx.device, ctx.config.format, &nav_mesh);
+
     // --- Slint UI overlay (software-rendered). Sized to the surface; recreated
     // on resize. The real size is set on the first resize when the surface is 0×0.
     let ui_w = ctx.config.width.max(1);
@@ -416,6 +423,8 @@ pub async fn build_world(window: Arc<Window>) -> anyhow::Result<World> {
     world.insert_resource(Selected::default());
     world.insert_resource(CursorPos::default());
     world.insert_resource(selection_box);
+    world.insert_resource(nav_mesh);
+    world.insert_resource(nav_overlay);
     world.insert_resource(ui_overlay);
     world.insert_resource(heightmap);
     world.insert_resource(terrain_params);

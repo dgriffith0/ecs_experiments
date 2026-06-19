@@ -2,9 +2,14 @@ use bevy_ecs::prelude::*;
 use glam::{Quat, Vec3};
 
 use crate::assets::GltfTemplate;
-use crate::ecs::components::{AnimationPlayer, FlyController, Pickable, SkinnedMesh, Transform};
+use crate::ecs::components::{
+    AnimationPlayer, FlyController, NavAgent, Pickable, SkinnedMesh, Transform,
+};
+use crate::ecs::resources::NavOverlay;
 use crate::render::context::RenderContext;
+use crate::render::pipeline::nav_lines_buffer;
 use crate::scene::gltf_model::GltfModel;
+use crate::scene::nav::NavMesh;
 use crate::scene::terrain::{self, Heightmap, TerrainParams, VoxelChunk};
 use crate::ui::Ui;
 
@@ -19,7 +24,14 @@ pub fn generate_terrain(
     }
 }
 
-type FoxBundle = (GltfModel, Transform, SkinnedMesh, AnimationPlayer, Pickable);
+type FoxBundle = (
+    GltfModel,
+    Transform,
+    SkinnedMesh,
+    AnimationPlayer,
+    Pickable,
+    NavAgent,
+);
 
 /// Build `heightmap.params().fox_count` fox instances scattered across valid
 /// surface points, each with a deterministic (seeded) random facing + animation
@@ -56,6 +68,10 @@ pub fn fox_bundles(
                 },
                 Pickable {
                     local_aabb: template.local_aabb,
+                },
+                NavAgent {
+                    path: Vec::new(),
+                    speed: 2.5,
                 },
             )
         })
@@ -117,6 +133,19 @@ pub fn regenerate_terrain(world: &mut World) {
     for fox in foxes {
         world.spawn(fox);
     }
+
+    // Rebuild the nav mesh and refresh its overlay's line buffer.
+    let nav_mesh = NavMesh::build(&heightmap);
+    let (lines, num_vertices) = {
+        let device = &world.non_send_resource::<RenderContext>().device;
+        nav_lines_buffer(device, &nav_mesh)
+    };
+    {
+        let mut overlay = world.resource_mut::<NavOverlay>();
+        overlay.lines = lines;
+        overlay.num_vertices = num_vertices;
+    }
+    world.insert_resource(nav_mesh);
 
     // Re-frame the camera to an overview looking at the world centre.
     let grid = heightmap.grid();

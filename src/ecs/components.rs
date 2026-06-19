@@ -93,6 +93,17 @@ pub struct Pickable {
     pub local_aabb: Aabb,
 }
 
+/// A nav-mesh agent that wanders: it follows a queued path of grid cells (stored
+/// reversed so the next waypoint is the last element), picking a fresh random
+/// destination via A* whenever the path empties.
+#[derive(Component)]
+pub struct NavAgent {
+    /// Remaining cells to visit, in reverse order (`pop()` yields the next).
+    pub path: Vec<(usize, usize)>,
+    /// Movement speed in metres/second.
+    pub speed: f32,
+}
+
 /// Animation playback state for a [`SkinnedMesh`] entity.
 #[derive(Component)]
 pub struct AnimationPlayer {

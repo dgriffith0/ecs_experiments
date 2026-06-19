@@ -1,6 +1,7 @@
 //! Per-frame systems, grouped by domain. The render system itself lives in
 //! `crate::render::draw`.
 
+mod agent;
 mod animation;
 mod camera;
 mod lighting;
@@ -9,6 +10,7 @@ mod terrain;
 mod time;
 mod upload;
 
+pub use agent::*;
 pub use animation::*;
 pub use camera::*;
 pub use lighting::*;

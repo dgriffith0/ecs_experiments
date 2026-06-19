@@ -4,8 +4,9 @@ use encase::ShaderType;
 use glam::{Mat4, Vec4};
 use wgpu::util::DeviceExt;
 
-use crate::ecs::resources::SelectionBox;
+use crate::ecs::resources::{NavOverlay, SelectionBox};
 use crate::render::texture;
+use crate::scene::nav::NavMesh;
 
 /// Uniform for the selection-box shader: clip-space transform + line color.
 #[derive(Copy, Clone, ShaderType)]
@@ -126,6 +127,131 @@ pub fn create_selection_box(
         edges,
         uniform,
         bind_group,
+        visible: false,
+    }
+}
+
+/// GPU vertex buffer of the nav-mesh overlay's link line endpoints. Returns the
+/// buffer and its vertex count (0 → nothing to draw). Falls back to a 1-vertex
+/// dummy buffer when there are no links so `create_buffer_init` never sees 0 bytes.
+pub fn nav_lines_buffer(device: &wgpu::Device, nav: &NavMesh) -> (wgpu::Buffer, u32) {
+    let verts = nav.segments();
+    if verts.is_empty() {
+        let lines = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
+            label: Some("nav_lines"),
+            contents: bytemuck::cast_slice(&[[0.0f32; 3]]),
+            usage: wgpu::BufferUsages::VERTEX,
+        });
+        return (lines, 0);
+    }
+    let lines = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
+        label: Some("nav_lines"),
+        contents: bytemuck::cast_slice(verts),
+        usage: wgpu::BufferUsages::VERTEX,
+    });
+    (lines, verts.len() as u32)
+}
+
+/// Build the nav-mesh debug overlay: a line-list pipeline (drawn on top, ignoring
+/// depth) reusing the selection shader + uniform, fed by the link line buffer.
+pub fn create_nav_overlay(
+    device: &wgpu::Device,
+    color_format: wgpu::TextureFormat,
+    nav: &NavMesh,
+) -> NavOverlay {
+    let (lines, num_vertices) = nav_lines_buffer(device, nav);
+
+    let initial = SelUniform {
+        mvp: Mat4::IDENTITY,
+        color: Vec4::new(0.2, 1.0, 0.4, 1.0),
+    };
+    let uniform = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
+        label: Some("nav_uniform"),
+        contents: &crate::util::uniform_bytes(&initial),
+        usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
+    });
+
+    let layout = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
+        label: Some("nav_layout"),
+        entries: &[wgpu::BindGroupLayoutEntry {
+            binding: 0,
+            visibility: wgpu::ShaderStages::VERTEX | wgpu::ShaderStages::FRAGMENT,
+            ty: wgpu::BindingType::Buffer {
+                ty: wgpu::BufferBindingType::Uniform,
+                has_dynamic_offset: false,
+                min_binding_size: None,
+            },
+            count: None,
+        }],
+    });
+    let bind_group = device.create_bind_group(&wgpu::BindGroupDescriptor {
+        label: Some("nav_bind_group"),
+        layout: &layout,
+        entries: &[wgpu::BindGroupEntry {
+            binding: 0,
+            resource: uniform.as_entire_binding(),
+        }],
+    });
+
+    let shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
+        label: Some("nav_shader"),
+        source: wgpu::ShaderSource::Wgsl(include_str!("shaders/selection.wgsl").into()),
+    });
+    let pipeline_layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
+        label: Some("nav_pipeline_layout"),
+        bind_group_layouts: &[Some(&layout)],
+        immediate_size: 0,
+    });
+    let pipeline = device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
+        label: Some("nav_pipeline"),
+        layout: Some(&pipeline_layout),
+        vertex: wgpu::VertexState {
+            module: &shader,
+            entry_point: Some("vs_main"),
+            buffers: &[wgpu::VertexBufferLayout {
+                array_stride: 12,
+                step_mode: wgpu::VertexStepMode::Vertex,
+                attributes: &wgpu::vertex_attr_array![0 => Float32x3],
+            }],
+            compilation_options: Default::default(),
+        },
+        fragment: Some(wgpu::FragmentState {
+            module: &shader,
+            entry_point: Some("fs_main"),
+            targets: &[Some(wgpu::ColorTargetState {
+                format: color_format,
+                blend: None,
+                write_mask: wgpu::ColorWrites::ALL,
+            })],
+            compilation_options: Default::default(),
+        }),
+        primitive: wgpu::PrimitiveState {
+            topology: wgpu::PrimitiveTopology::LineList,
+            ..Default::default()
+        },
+        // Drawn on top of the scene: depth attachment present, never tested/written.
+        depth_stencil: Some(wgpu::DepthStencilState {
+            format: texture::Texture::DEPTH_FORMAT,
+            depth_write_enabled: Some(false),
+            depth_compare: Some(wgpu::CompareFunction::Always),
+            stencil: wgpu::StencilState::default(),
+            bias: wgpu::DepthBiasState::default(),
+        }),
+        multisample: wgpu::MultisampleState {
+            count: 1,
+            mask: !0,
+            alpha_to_coverage_enabled: false,
+        },
+        multiview_mask: None,
+        cache: None,
+    });
+
+    NavOverlay {
+        pipeline,
+        uniform,
+        bind_group,
+        lines,
+        num_vertices,
         visible: false,
     }
 }
