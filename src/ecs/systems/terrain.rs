@@ -4,6 +4,7 @@ use glam::{Quat, Vec3};
 use crate::assets::{AssetRegistry, LoadedAsset};
 use crate::ecs::components::{
     AnimationPlayer, FlyController, NavAgent, Pickable, Placed, SkinnedMesh, Transform, Tree,
+    Wander,
 };
 use crate::ecs::resources::NavOverlay;
 use crate::render::context::RenderContext;
@@ -31,6 +32,7 @@ type FoxBundle = (
     AnimationPlayer,
     Pickable,
     NavAgent,
+    Wander,
 );
 
 /// Build `heightmap.params().fox_count` fox instances scattered across valid
@@ -74,6 +76,7 @@ pub fn fox_bundles(
                     path: Vec::new(),
                     speed: 2.5,
                 },
+                Wander,
             )
         })
         .collect()
@@ -155,10 +158,10 @@ pub fn regenerate_terrain(world: &mut World) {
         world.spawn(chunk);
     }
 
-    // Replace the foxes: despawn the old ones (foxes carry a `NavAgent`, so this
-    // leaves other skinned characters alone), scatter a fresh set on the surface.
+    // Replace the foxes: despawn the old ones (foxes carry `Wander`, so this leaves
+    // pawns and other characters alone), scatter a fresh set on the surface.
     let old_foxes: Vec<Entity> = world
-        .query_filtered::<Entity, With<NavAgent>>()
+        .query_filtered::<Entity, With<Wander>>()
         .iter(world)
         .collect();
     for e in old_foxes {

@@ -20,8 +20,8 @@ use crate::ecs::resources::{
     Time, ViewProj, VoxelGpu, VoxelSettingsRes,
 };
 use crate::ecs::systems::{
-    animate, fly_camera, fox_bundles, generate_terrain, orbit_light, tree_bundles,
-    update_selection_box, upload_nav_overlay, wander_foxes,
+    animate, fly_camera, fox_bundles, generate_terrain, move_agents, orbit_light, tree_bundles,
+    update_selection_box, upload_nav_overlay, wander,
     update_time, update_view_proj, upload_camera, upload_light, upload_model_transforms,
     upload_skybox, upload_voxel_settings,
 };
@@ -29,6 +29,7 @@ use crate::assets;
 use crate::render::context::RenderContext;
 use crate::render::draw::render;
 use crate::render::pipeline::{create_nav_overlay, create_render_pipeline, create_selection_box};
+use crate::scripting::{load_scripts, run_scripts};
 use crate::render::texture;
 use crate::scene::gltf_model;
 use crate::scene::light::LightUniform;
@@ -47,7 +48,8 @@ pub fn build_schedule() -> Schedule {
     schedule.add_systems(
         (
             update_time,
-            (fly_camera, orbit_light, wander_foxes),
+            (fly_camera, orbit_light, wander, move_agents),
+            run_scripts,
             sync_ui,
             update_view_proj,
             (
@@ -444,6 +446,7 @@ pub async fn build_world(window: Arc<Window>) -> anyhow::Result<World> {
     world.insert_resource(terrain_params);
     world.insert_non_send_resource(slint_ui);
     world.insert_non_send_resource(ctx);
+    world.insert_non_send_resource(load_scripts().await?);
 
     // Run terrain generation exactly once (it reads the heightmap + render context
     // and spawns the chunk entities).

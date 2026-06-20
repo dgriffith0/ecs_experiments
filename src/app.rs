@@ -123,6 +123,21 @@ impl ApplicationHandler for App {
                     picking::pick_at(world);
                 }
             }
+            WindowEvent::MouseInput {
+                state: ElementState::Pressed,
+                button: MouseButton::Right,
+                ..
+            } => {
+                // Right-click: order the selected pawn to walk to the clicked voxel.
+                let (scale, in_game) = {
+                    let ui = world.non_send_resource::<Ui>();
+                    (ui.scale, ui.component.get_in_game())
+                };
+                let logical_x = world.resource::<CursorPos>().0 / scale;
+                if in_game && logical_x > UI_PANEL_WIDTH {
+                    picking::command_pawn(world);
+                }
+            }
             WindowEvent::KeyboardInput {
                 event:
                     KeyEvent {

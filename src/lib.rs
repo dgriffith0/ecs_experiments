@@ -4,6 +4,7 @@ mod ecs;
 mod picking;
 mod render;
 mod scene;
+mod scripting;
 mod ui;
 mod util;
 

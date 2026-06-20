@@ -11,5 +11,6 @@
         scale: 0.6,
         animation: Some("Idle"),
         position: Some((16.0, 54.0)),
+        pawn: true,
     ),
 ]

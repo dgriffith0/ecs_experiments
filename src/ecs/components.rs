@@ -103,9 +103,19 @@ pub struct Placed;
 #[derive(Component)]
 pub struct Tree;
 
-/// A nav-mesh agent that wanders: it follows a queued path of grid cells (stored
-/// reversed so the next waypoint is the last element), picking a fresh random
-/// destination via A* whenever the path empties.
+/// Marks an agent that should auto-wander (pick random nav-mesh destinations).
+/// Foxes have it; player-controlled pawns don't.
+#[derive(Component)]
+pub struct Wander;
+
+/// Marks a player-controllable pawn: left-click to select, right-click a voxel to
+/// order it to walk there (it carries a [`NavAgent`] but no [`Wander`]).
+#[derive(Component)]
+pub struct Pawn;
+
+/// A nav-mesh agent: it follows a queued path of grid cells (stored reversed so
+/// the next waypoint is the last element). Foxes ([`Wander`]) refill it with
+/// random goals; pawns ([`Pawn`]) get it set by player commands.
 #[derive(Component)]
 pub struct NavAgent {
     /// Remaining cells to visit, in reverse order (`pop()` yields the next).

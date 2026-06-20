@@ -4,33 +4,29 @@
 use bevy_ecs::prelude::*;
 use glam::{Vec3, Vec4, Vec4Swizzles};
 
-use crate::ecs::components::{Camera, Pickable, Transform};
+use crate::ecs::components::{Camera, NavAgent, Pawn, Pickable, Transform};
 use crate::ecs::resources::{CursorPos, Selected, ViewProj};
 use crate::render::context::RenderContext;
+use crate::scene::nav::NavMesh;
 use crate::scene::terrain::{self, Heightmap};
 
-/// Cast a ray from the cursor and set `Selected` to the nearest entity (or clear it).
-pub fn pick_at(world: &mut World) {
+/// Unproject the cursor into a world-space `(origin, direction)` ray, or `None` if
+/// there's no surface / camera yet.
+fn cursor_ray(world: &mut World) -> Option<(Vec3, Vec3)> {
     let cursor = *world.resource::<CursorPos>();
     let (sw, sh) = {
         let ctx = world.non_send_resource::<RenderContext>();
         (ctx.config.width as f32, ctx.config.height as f32)
     };
     if sw <= 0.0 || sh <= 0.0 {
-        return;
+        return None;
     }
     let view_proj = world.resource::<ViewProj>().0;
-
-    // Camera eye (ray origin).
     let eye = {
         let mut q = world.query_filtered::<&Transform, With<Camera>>();
-        match q.iter(world).next() {
-            Some(t) => t.translation,
-            None => return,
-        }
+        q.iter(world).next()?.translation
     };
-
-    // Unproject the cursor to a world-space ray (same near/far convention as skybox.wgsl).
+    // Same near/far convention as skybox.wgsl.
     let ndc_x = 2.0 * (cursor.0 / sw) - 1.0;
     let ndc_y = 1.0 - 2.0 * (cursor.1 / sh);
     let inv = view_proj.inverse();
@@ -38,8 +34,14 @@ pub fn pick_at(world: &mut World) {
         let p = inv * Vec4::new(ndc_x, ndc_y, z, 1.0);
         p.xyz() / p.w
     };
-    let dir = (unproject(1.0) - unproject(0.0)).normalize();
-    let origin = eye;
+    Some((eye, (unproject(1.0) - unproject(0.0)).normalize()))
+}
+
+/// Cast a ray from the cursor and set `Selected` to the nearest entity (or clear it).
+pub fn pick_at(world: &mut World) {
+    let Some((origin, dir)) = cursor_ray(world) else {
+        return;
+    };
 
     // Nearest hit across pickable objects (fox, light) and the terrain voxel.
     let mut best_t = f32::INFINITY;
@@ -73,6 +75,50 @@ pub fn pick_at(world: &mut World) {
     }
 
     *world.resource_mut::<Selected>() = best;
+}
+
+/// If a [`Pawn`] is selected, ray-cast the cursor onto the terrain and order that
+/// pawn to walk there: A* a path from its current cell to the clicked cell and
+/// store it on its [`NavAgent`]. No-op if nothing/​non-pawn is selected or the
+/// cursor isn't over the terrain.
+pub fn command_pawn(world: &mut World) {
+    let Selected::Object(pawn) = *world.resource::<Selected>() else {
+        return;
+    };
+    if world.get::<Pawn>(pawn).is_none() {
+        return;
+    }
+    let Some((origin, dir)) = cursor_ray(world) else {
+        return;
+    };
+
+    // Target cell under the cursor.
+    let goal = {
+        let heightmap = world.resource::<Heightmap>();
+        let Some((_, hit)) = raymarch_terrain(origin, dir, heightmap) else {
+            return;
+        };
+        heightmap.cell_coords(hit.x, hit.z)
+    };
+    // Pawn's current cell.
+    let Some(pos) = world.get::<Transform>(pawn).map(|t| t.translation) else {
+        return;
+    };
+    let start = world.resource::<Heightmap>().cell_coords(pos.x, pos.z);
+
+    // Plan the route and hand it to the pawn.
+    let path = {
+        let nav = world.resource::<NavMesh>();
+        let heightmap = world.resource::<Heightmap>();
+        nav.find_path(heightmap, start, goal)
+    };
+    if let Some(mut path) = path
+        && let Some(mut agent) = world.get_mut::<NavAgent>(pawn)
+    {
+        path.reverse(); // pop() yields the next waypoint
+        path.pop(); // drop the start cell
+        agent.path = path;
+    }
 }
 
 /// March the ray against the terrain heightmap (only where chunks exist). Returns

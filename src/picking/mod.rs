@@ -4,4 +4,4 @@ mod aabb;
 pub mod pick;
 
 pub use aabb::Aabb;
-pub use pick::pick_at;
+pub use pick::{command_pawn, pick_at};

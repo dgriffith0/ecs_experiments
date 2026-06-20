@@ -7,7 +7,9 @@ use wgpu::util::DeviceExt;
 use bevy_ecs::prelude::{Entity, Resource, World};
 use serde::Deserialize;
 
-use crate::ecs::components::{AnimationPlayer, Pickable, Placed, SkinnedMesh, Transform};
+use crate::ecs::components::{
+    AnimationPlayer, NavAgent, Pawn, Pickable, Placed, SkinnedMesh, Transform,
+};
 use crate::picking::Aabb;
 use crate::render::texture;
 use crate::scene::animation::{AnimationClip, Channel, ChannelData, Skeleton, Trs};
@@ -433,6 +435,10 @@ struct AssetDef {
     position: Option<(f32, f32)>,
     #[serde(default)]
     yaw: f32,
+    /// If true, spawned instances are player-controllable pawns (selectable +
+    /// orderable with right-click).
+    #[serde(default)]
+    pawn: bool,
 }
 
 /// A loaded asset: its reusable GPU template plus default instancing parameters.
@@ -441,6 +447,8 @@ pub struct LoadedAsset {
     pub scale: f32,
     /// Index of the default animation clip (resolved from its name), if any.
     pub clip: Option<usize>,
+    /// Whether instances are controllable pawns.
+    pub is_pawn: bool,
 }
 
 impl LoadedAsset {
@@ -468,6 +476,15 @@ impl LoadedAsset {
                     clip: self.clip.unwrap_or(0),
                     time: 0.0,
                     speed: 1.0,
+                },
+            ));
+        }
+        if self.is_pawn {
+            entity.insert((
+                Pawn,
+                NavAgent {
+                    path: Vec::new(),
+                    speed: 2.0,
                 },
             ));
         }
@@ -535,6 +552,7 @@ pub async fn load_assets(
                 template,
                 scale: def.scale,
                 clip,
+                is_pawn: def.pawn,
             },
         );
     }
