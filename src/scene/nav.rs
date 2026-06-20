@@ -88,6 +88,16 @@ impl NavMesh {
         &self.cells
     }
 
+    /// Columns per side of the grid.
+    pub fn extent(&self) -> u32 {
+        self.grid.width as u32
+    }
+
+    /// Whether the cell at `(gx, gz)` is walkable (a vertex in the nav graph).
+    pub fn is_walkable(&self, gx: i64, gz: i64) -> bool {
+        gx >= 0 && gz >= 0 && self.grid.has_vertex((gx as usize, gz as usize))
+    }
+
     /// A* path of cell coords from `start` to `goal` (inclusive of both), or
     /// `None` if unreachable. Adjacent cells only link when the height step is
     /// `≤ NAV_MAX_STEP`, so cliffs aren't crossed. Uniform per-step cost.

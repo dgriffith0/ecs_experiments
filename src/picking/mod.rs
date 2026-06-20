@@ -4,4 +4,4 @@ mod aabb;
 pub mod pick;
 
 pub use aabb::Aabb;
-pub use pick::{command_pawn, pick_at};
+pub use pick::{box_select, command_pawns, pick_at};

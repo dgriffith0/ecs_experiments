@@ -13,11 +13,10 @@ use slint::platform::software_renderer::{
 use slint::platform::{Platform, PointerEventButton, WindowAdapter, WindowEvent};
 use slint::{ComponentHandle, LogicalPosition, PhysicalSize};
 
-use crate::ecs::components::{AnimationPlayer, Camera, PointLight, Transform};
-use crate::ecs::resources::{Selected, Time, VoxelSettingsRes};
+use crate::ecs::components::{AnimationPlayer, Camera, Transform};
+use crate::ecs::resources::{Selection, Time, VoxelSettingsRes};
 use crate::render::context::RenderContext;
 use crate::render::texture;
-use crate::scene::gltf_model::GltfModel;
 use crate::scene::terrain::VoxelSettings;
 
 slint::include_modules!(); // generates `AppWindow` from ui/app.slint
@@ -257,12 +256,10 @@ pub fn render_ui(ctx: NonSend<RenderContext>, ui: NonSend<Ui>, mut overlay: ResM
 pub fn sync_ui(
     ui: NonSend<Ui>,
     time: Res<Time>,
-    selected: Res<Selected>,
+    selection: Res<Selection>,
     mut settings: ResMut<VoxelSettingsRes>,
     mut players: Query<&mut AnimationPlayer>,
     camera: Query<&Transform, With<Camera>>,
-    is_gltf: Query<(), With<GltfModel>>,
-    is_light: Query<(), With<PointLight>>,
 ) {
     let c = &ui.component;
 
@@ -295,14 +292,10 @@ pub fn sync_ui(
         );
     }
 
-    let label = match *selected {
-        Selected::None => "none".to_string(),
-        Selected::Object(e) if is_gltf.get(e).is_ok() => format!("{e} — glTF"),
-        Selected::Object(e) if is_light.get(e).is_ok() => format!("{e} — Light"),
-        Selected::Object(e) => format!("{e}"),
-        Selected::Voxel { coord, .. } => {
-            format!("Voxel ({}, {}, {})", coord.x, coord.y, coord.z)
-        }
+    let label = match selection.0.len() {
+        0 => "none".to_string(),
+        1 => "1 pawn".to_string(),
+        n => format!("{n} pawns"),
     };
     c.set_selected(label.into());
 }

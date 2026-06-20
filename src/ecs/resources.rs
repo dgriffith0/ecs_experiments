@@ -5,7 +5,7 @@
 //! `Send + Sync` GPU state or small per-frame data.
 
 use bevy_ecs::prelude::Resource;
-use glam::{IVec3, Mat4, Vec3};
+use glam::Mat4;
 use winit::keyboard::KeyCode;
 
 use crate::render::texture;
@@ -61,34 +61,34 @@ pub struct Time {
     pub last: Option<std::time::Instant>,
 }
 
-/// The current selection (set by picking): nothing, a scene object entity, or an
-/// individual terrain voxel (its grid coord + world-space cube).
-#[derive(Resource, Default, Clone, Copy)]
-pub enum Selected {
-    #[default]
-    None,
-    Object(bevy_ecs::entity::Entity),
-    Voxel {
-        coord: IVec3,
-        min: Vec3,
-        max: Vec3,
-    },
-}
+/// The currently selected pawns (set by picking / box-select).
+#[derive(Resource, Default)]
+pub struct Selection(pub Vec<bevy_ecs::entity::Entity>);
 
 /// Last physical cursor position, used by picking.
 #[derive(Resource, Default, Clone, Copy)]
 pub struct CursorPos(pub f32, pub f32);
 
-/// Wireframe selection-box overlay: a unit-cube line list transformed to the
-/// selected entity's world AABB and drawn on top of the scene.
-#[derive(Resource)]
-pub struct SelectionBox {
+/// A reusable world-space line overlay drawn on top of the scene: a `COPY_DST`
+/// vertex buffer (capacity `capacity` line vertices) re-filled each frame, plus a
+/// `SelUniform` (MVP + colour). Used for selection boxes and destination markers.
+pub struct LineOverlay {
     pub pipeline: wgpu::RenderPipeline,
-    pub edges: wgpu::Buffer,
     pub uniform: wgpu::Buffer,
     pub bind_group: wgpu::BindGroup,
+    pub lines: wgpu::Buffer,
+    pub capacity: u32,
+    pub num_vertices: u32,
     pub visible: bool,
 }
+
+/// Yellow boxes around the selected pawns.
+#[derive(Resource)]
+pub struct SelectionOverlay(pub LineOverlay);
+
+/// Green boxes on each moving pawn's destination cell.
+#[derive(Resource)]
+pub struct DestinationOverlay(pub LineOverlay);
 
 /// Debug overlay for the navigation mesh: a line list of walkable cell-to-cell
 /// links, drawn on top of the scene (toggle with `N`). Rebuilt with the terrain.

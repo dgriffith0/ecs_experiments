@@ -1,11 +1,13 @@
-//! CPU mouse picking: unproject the cursor to a world ray, test object AABBs and
-//! ray-march the terrain heightmap, and store the nearest hit in `Selected`.
+//! CPU mouse control of pawns: unproject the cursor to a world ray to select pawns
+//! (click / shift-click / drag-box) and order the selection to walk to a voxel.
+
+use std::collections::{HashSet, VecDeque};
 
 use bevy_ecs::prelude::*;
 use glam::{Vec3, Vec4, Vec4Swizzles};
 
 use crate::ecs::components::{Camera, NavAgent, Pawn, Pickable, Transform};
-use crate::ecs::resources::{CursorPos, Selected, ViewProj};
+use crate::ecs::resources::{CursorPos, Selection, ViewProj};
 use crate::render::context::RenderContext;
 use crate::scene::nav::NavMesh;
 use crate::scene::terrain::{self, Heightmap};
@@ -37,62 +39,104 @@ fn cursor_ray(world: &mut World) -> Option<(Vec3, Vec3)> {
     Some((eye, (unproject(1.0) - unproject(0.0)).normalize()))
 }
 
-/// Cast a ray from the cursor and set `Selected` to the nearest entity (or clear it).
-pub fn pick_at(world: &mut World) {
+/// Left-click: select the pawn under the cursor. `additive` (shift) toggles it in
+/// the selection; otherwise it replaces the selection. Clicking empty ground (no
+/// pawn) clears the selection unless `additive`.
+pub fn pick_at(world: &mut World, additive: bool) {
     let Some((origin, dir)) = cursor_ray(world) else {
         return;
     };
 
-    // Nearest hit across pickable objects (fox, light) and the terrain voxel.
+    // Nearest pawn under the cursor (pawns only — foxes etc. aren't selectable).
     let mut best_t = f32::INFINITY;
-    let mut best = Selected::None;
-
-    {
-        let mut q = world.query::<(Entity, &Transform, &Pickable)>();
-        for (entity, transform, pickable) in q.iter(world) {
-            if let Some(t) = pickable
-                .local_aabb
-                .transformed(&transform.matrix())
-                .ray_intersect(origin, dir)
-                && t < best_t
-            {
-                best_t = t;
-                best = Selected::Object(entity);
-            }
-        }
-    }
-
-    // Terrain: ray-march the heightmap; nudge inside the surface to land in the
-    // solid voxel, then snap to that voxel cell.
-    {
-        let heightmap = world.resource::<Heightmap>();
-        if let Some((t, hit)) = raymarch_terrain(origin, dir, heightmap)
+    let mut hit: Option<Entity> = None;
+    let mut q = world.query_filtered::<(Entity, &Transform, &Pickable), With<Pawn>>();
+    for (entity, transform, pickable) in q.iter(world) {
+        if let Some(t) = pickable
+            .local_aabb
+            .transformed(&transform.matrix())
+            .ray_intersect(origin, dir)
             && t < best_t
         {
-            let (coord, min, max) = terrain::voxel_cell_at(hit + dir * 0.02, heightmap.grid());
-            best = Selected::Voxel { coord, min, max };
+            best_t = t;
+            hit = Some(entity);
         }
     }
 
-    *world.resource_mut::<Selected>() = best;
+    let mut selection = world.resource_mut::<Selection>();
+    match hit {
+        Some(e) if additive => match selection.0.iter().position(|&x| x == e) {
+            Some(i) => {
+                selection.0.remove(i);
+            }
+            None => selection.0.push(e),
+        },
+        Some(e) => {
+            selection.0.clear();
+            selection.0.push(e);
+        }
+        None if !additive => selection.0.clear(),
+        None => {}
+    }
 }
 
-/// If a [`Pawn`] is selected, ray-cast the cursor onto the terrain and order that
-/// pawn to walk there: A* a path from its current cell to the clicked cell and
-/// store it on its [`NavAgent`]. No-op if nothing/​non-pawn is selected or the
-/// cursor isn't over the terrain.
-pub fn command_pawn(world: &mut World) {
-    let Selected::Object(pawn) = *world.resource::<Selected>() else {
-        return;
+/// Drag-box select: every pawn whose screen position falls inside the rectangle
+/// (physical pixels). `additive` (shift) adds to the selection instead of replacing.
+pub fn box_select(world: &mut World, min: (f32, f32), max: (f32, f32), additive: bool) {
+    let view_proj = world.resource::<ViewProj>().0;
+    let (sw, sh) = {
+        let ctx = world.non_send_resource::<RenderContext>();
+        (ctx.config.width as f32, ctx.config.height as f32)
     };
-    if world.get::<Pawn>(pawn).is_none() {
+    if sw <= 0.0 || sh <= 0.0 {
         return;
     }
+
+    let mut inside: Vec<Entity> = Vec::new();
+    let mut q = world.query_filtered::<(Entity, &Transform), With<Pawn>>();
+    for (entity, transform) in q.iter(world) {
+        let clip = view_proj * transform.translation.extend(1.0);
+        if clip.w <= 0.0 {
+            continue; // behind the camera
+        }
+        let ndc = clip.xyz() / clip.w;
+        let sx = (ndc.x * 0.5 + 0.5) * sw;
+        let sy = (1.0 - (ndc.y * 0.5 + 0.5)) * sh;
+        if sx >= min.0 && sx <= max.0 && sy >= min.1 && sy <= max.1 {
+            inside.push(entity);
+        }
+    }
+
+    let mut selection = world.resource_mut::<Selection>();
+    if !additive {
+        selection.0.clear();
+    }
+    for e in inside {
+        if !selection.0.contains(&e) {
+            selection.0.push(e);
+        }
+    }
+}
+
+/// Right-click: order every selected pawn to walk to the clicked voxel. Each pawn
+/// gets its **own** distinct destination cell in a compact formation around the
+/// target (no stacking), then A*-paths there. No-op without a selection / terrain hit.
+pub fn command_pawns(world: &mut World) {
+    // Live selected pawns (clone the list so we don't hold the resource borrow).
+    let pawns: Vec<Entity> = world
+        .resource::<Selection>()
+        .0
+        .clone()
+        .into_iter()
+        .filter(|&e| world.get::<Pawn>(e).is_some())
+        .collect();
+    if pawns.is_empty() {
+        return;
+    }
+
     let Some((origin, dir)) = cursor_ray(world) else {
         return;
     };
-
-    // Target cell under the cursor.
     let goal = {
         let heightmap = world.resource::<Heightmap>();
         let Some((_, hit)) = raymarch_terrain(origin, dir, heightmap) else {
@@ -100,25 +144,62 @@ pub fn command_pawn(world: &mut World) {
         };
         heightmap.cell_coords(hit.x, hit.z)
     };
-    // Pawn's current cell.
-    let Some(pos) = world.get::<Transform>(pawn).map(|t| t.translation) else {
-        return;
-    };
-    let start = world.resource::<Heightmap>().cell_coords(pos.x, pos.z);
 
-    // Plan the route and hand it to the pawn.
-    let path = {
+    // One walkable destination cell per pawn, closest-to-target first.
+    let cells = {
         let nav = world.resource::<NavMesh>();
-        let heightmap = world.resource::<Heightmap>();
-        nav.find_path(heightmap, start, goal)
+        formation_cells(nav, goal, pawns.len())
     };
-    if let Some(mut path) = path
-        && let Some(mut agent) = world.get_mut::<NavAgent>(pawn)
-    {
-        path.reverse(); // pop() yields the next waypoint
-        path.pop(); // drop the start cell
-        agent.path = path;
+
+    for (i, &pawn) in pawns.iter().enumerate() {
+        let Some(&dest) = cells.get(i) else { break };
+        let Some(pos) = world.get::<Transform>(pawn).map(|t| t.translation) else {
+            continue;
+        };
+        let start = world.resource::<Heightmap>().cell_coords(pos.x, pos.z);
+        let path = {
+            let nav = world.resource::<NavMesh>();
+            let heightmap = world.resource::<Heightmap>();
+            nav.find_path(heightmap, start, dest)
+        };
+        if let Some(mut path) = path
+            && let Some(mut agent) = world.get_mut::<NavAgent>(pawn)
+        {
+            path.reverse(); // pop() yields the next waypoint
+            path.pop(); // drop the start cell
+            agent.path = path;
+        }
     }
+}
+
+/// Collect up to `n` distinct walkable cells, breadth-first outward from `goal`
+/// (so closest cells fill first) — a compact formation around the target.
+fn formation_cells(nav: &NavMesh, goal: (usize, usize), n: usize) -> Vec<(usize, usize)> {
+    let extent = nav.extent() as i32;
+    let mut out = Vec::new();
+    let mut seen = HashSet::new();
+    let mut queue = VecDeque::new();
+    seen.insert(goal);
+    queue.push_back(goal);
+    while let Some((x, z)) = queue.pop_front() {
+        if nav.is_walkable(x as i64, z as i64) {
+            out.push((x, z));
+            if out.len() >= n {
+                break;
+            }
+        }
+        for (dx, dz) in [(1, 0), (-1, 0), (0, 1), (0, -1)] {
+            let (nx, nz) = (x as i32 + dx, z as i32 + dz);
+            if nx < 0 || nz < 0 || nx >= extent || nz >= extent {
+                continue;
+            }
+            let cell = (nx as usize, nz as usize);
+            if seen.insert(cell) {
+                queue.push_back(cell);
+            }
+        }
+    }
+    out
 }
 
 /// March the ray against the terrain heightmap (only where chunks exist). Returns

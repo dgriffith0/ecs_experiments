@@ -1,51 +1,96 @@
 use bevy_ecs::prelude::*;
-use glam::{Mat4, Vec4};
+use glam::{Mat4, Vec3, Vec4};
 
-use crate::ecs::components::{Pickable, Transform};
-use crate::ecs::resources::{NavOverlay, Selected, SelectionBox, ViewProj};
+use crate::ecs::components::{NavAgent, Pawn, Pickable, Transform};
+use crate::ecs::resources::{
+    DestinationOverlay, LineOverlay, NavOverlay, Selection, SelectionOverlay, ViewProj,
+};
 use crate::render::context::RenderContext;
-use crate::render::pipeline::SelUniform;
+use crate::render::pipeline::{box_edges, SelUniform};
+use crate::scene::terrain::Heightmap;
 use crate::util::uniform_bytes;
 
-/// Position the wireframe selection box on the selection's world AABB (the object's
-/// transformed bounds, or the picked voxel's 1 m cube).
-pub fn update_selection_box(
-    ctx: NonSend<RenderContext>,
-    selected: Res<Selected>,
-    view_proj: Res<ViewProj>,
-    mut sel_box: ResMut<SelectionBox>,
-    objects: Query<(&Transform, &Pickable)>,
+/// Re-fill a line overlay's vertex buffer + uniform for this frame. Lines are in
+/// world space, so the MVP is just the view-projection.
+fn upload_line_overlay(
+    queue: &wgpu::Queue,
+    overlay: &mut LineOverlay,
+    mvp: Mat4,
+    color: Vec4,
+    verts: &[[f32; 3]],
 ) {
-    let (min, max) = match *selected {
-        Selected::None => {
-            sel_box.visible = false;
-            return;
-        }
-        Selected::Object(entity) => match objects.get(entity) {
-            Ok((transform, pickable)) => {
-                let aabb = pickable.local_aabb.transformed(&transform.matrix());
-                (aabb.min, aabb.max)
-            }
-            Err(_) => {
-                sel_box.visible = false;
-                return;
-            }
-        },
-        Selected::Voxel { min, max, .. } => (min, max),
-    };
-    // Map the unit cube → the world AABB, then to clip space.
-    let box_model = Mat4::from_translation(min) * Mat4::from_scale(max - min);
-    let uniform = SelUniform {
-        mvp: view_proj.0 * box_model,
-        color: Vec4::new(1.0, 0.9, 0.2, 1.0),
-    };
-    ctx.queue
-        .write_buffer(&sel_box.uniform, 0, &uniform_bytes(&uniform));
-    sel_box.visible = true;
+    let n = (verts.len() as u32).min(overlay.capacity);
+    overlay.num_vertices = n;
+    overlay.visible = n > 0;
+    if n == 0 {
+        return;
+    }
+    queue.write_buffer(
+        &overlay.lines,
+        0,
+        bytemuck::cast_slice(&verts[..n as usize]),
+    );
+    queue.write_buffer(
+        &overlay.uniform,
+        0,
+        &uniform_bytes(&SelUniform { mvp, color }),
+    );
 }
 
-/// Keep the nav-mesh overlay's transform uniform current (its lines are in world
-/// space, so the MVP is just the view-projection). Only runs when visible.
+/// Draw a yellow wireframe box around every selected pawn (its world-space AABB).
+pub fn update_selection_overlay(
+    ctx: NonSend<RenderContext>,
+    view_proj: Res<ViewProj>,
+    selection: Res<Selection>,
+    mut overlay: ResMut<SelectionOverlay>,
+    pickables: Query<(&Transform, &Pickable)>,
+) {
+    let mut verts: Vec<[f32; 3]> = Vec::new();
+    for &entity in &selection.0 {
+        if let Ok((transform, pickable)) = pickables.get(entity) {
+            let aabb = pickable.local_aabb.transformed(&transform.matrix());
+            verts.extend_from_slice(&box_edges(aabb.min, aabb.max));
+        }
+    }
+    upload_line_overlay(
+        &ctx.queue,
+        &mut overlay.0,
+        view_proj.0,
+        Vec4::new(1.0, 0.9, 0.2, 1.0),
+        &verts,
+    );
+}
+
+/// Draw a green wireframe box on each moving pawn's destination cell (the goal of
+/// its current path), so you can see where the group is headed until it arrives.
+pub fn update_destination_overlay(
+    ctx: NonSend<RenderContext>,
+    view_proj: Res<ViewProj>,
+    heightmap: Res<Heightmap>,
+    mut overlay: ResMut<DestinationOverlay>,
+    pawns: Query<&NavAgent, With<Pawn>>,
+) {
+    let mut verts: Vec<[f32; 3]> = Vec::new();
+    for agent in &pawns {
+        // Path is stored reversed, so `first()` is the goal (assigned) cell.
+        if let Some(&(cx, cz)) = agent.path.first() {
+            let c = heightmap.cell_center(cx as i64, cz as i64);
+            let min = Vec3::new(c.x - 0.5, c.y, c.z - 0.5);
+            let max = Vec3::new(c.x + 0.5, c.y + 1.0, c.z + 0.5);
+            verts.extend_from_slice(&box_edges(min, max));
+        }
+    }
+    upload_line_overlay(
+        &ctx.queue,
+        &mut overlay.0,
+        view_proj.0,
+        Vec4::new(0.2, 1.0, 0.4, 1.0),
+        &verts,
+    );
+}
+
+/// Keep the nav-mesh overlay's transform uniform current (lines are world-space,
+/// so the MVP is just the view-projection). Only runs when visible.
 pub fn upload_nav_overlay(
     ctx: NonSend<RenderContext>,
     view_proj: Res<ViewProj>,
@@ -54,10 +99,15 @@ pub fn upload_nav_overlay(
     if !nav.visible {
         return;
     }
-    let uniform = SelUniform {
-        mvp: view_proj.0,
-        color: Vec4::new(0.2, 1.0, 0.4, 1.0),
-    };
-    ctx.queue
-        .write_buffer(&nav.uniform, 0, &uniform_bytes(&uniform));
+    queue_uniform(
+        &ctx.queue,
+        &nav.uniform,
+        view_proj.0,
+        Vec4::new(0.2, 1.0, 0.4, 1.0),
+    );
+}
+
+/// Write a `SelUniform { mvp, color }` into an overlay's uniform buffer.
+fn queue_uniform(queue: &wgpu::Queue, buffer: &wgpu::Buffer, mvp: Mat4, color: Vec4) {
+    queue.write_buffer(buffer, 0, &uniform_bytes(&SelUniform { mvp, color }));
 }

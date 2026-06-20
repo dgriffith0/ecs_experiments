@@ -26,6 +26,10 @@ const UI_PANEL_WIDTH: f32 = 260.0;
 pub struct App {
     world: Option<World>,
     schedule: Schedule,
+    /// Whether Shift is held (additive selection).
+    shift: bool,
+    /// Physical cursor position where a left-drag began (for box-select).
+    drag_start: Option<(f32, f32)>,
 }
 
 impl App {
@@ -33,6 +37,8 @@ impl App {
         Self {
             world: None,
             schedule: build_schedule(),
+            shift: false,
+            drag_start: None,
         }
     }
 }
@@ -102,25 +108,68 @@ impl ApplicationHandler for App {
             WindowEvent::CloseRequested => event_loop.exit(),
             WindowEvent::Resized(size) => resize(world, size.width, size.height),
             WindowEvent::RedrawRequested => self.schedule.run(world),
+            WindowEvent::ModifiersChanged(mods) => {
+                self.shift = mods.state().shift_key();
+            }
             WindowEvent::CursorMoved { position, .. } => {
-                let mut cursor = world.resource_mut::<CursorPos>();
-                cursor.0 = position.x as f32;
-                cursor.1 = position.y as f32;
+                {
+                    let mut cursor = world.resource_mut::<CursorPos>();
+                    cursor.0 = position.x as f32;
+                    cursor.1 = position.y as f32;
+                }
+                // While dragging, draw the rubber-band rectangle (logical px).
+                if let Some(start) = self.drag_start {
+                    let scale = world.non_send_resource::<Ui>().scale;
+                    let (x0, x1) = (
+                        start.0.min(position.x as f32),
+                        start.0.max(position.x as f32),
+                    );
+                    let (y0, y1) = (
+                        start.1.min(position.y as f32),
+                        start.1.max(position.y as f32),
+                    );
+                    let c = &world.non_send_resource::<Ui>().component;
+                    c.set_drag_x(x0 / scale);
+                    c.set_drag_y(y0 / scale);
+                    c.set_drag_width((x1 - x0) / scale);
+                    c.set_drag_height((y1 - y0) / scale);
+                    c.set_drag_active(true);
+                }
             }
             WindowEvent::MouseInput {
                 state: ElementState::Pressed,
                 button: MouseButton::Left,
                 ..
             } => {
-                // Pick only in-game, and only when the click is in the viewport
-                // (not over the HUD panel).
+                // Begin a left-drag in the viewport (resolved to click vs box on release).
                 let (scale, in_game) = {
                     let ui = world.non_send_resource::<Ui>();
                     (ui.scale, ui.component.get_in_game())
                 };
-                let logical_x = world.resource::<CursorPos>().0 / scale;
-                if in_game && logical_x > UI_PANEL_WIDTH {
-                    picking::pick_at(world);
+                let cursor = *world.resource::<CursorPos>();
+                if in_game && cursor.0 / scale > UI_PANEL_WIDTH {
+                    self.drag_start = Some((cursor.0, cursor.1));
+                }
+            }
+            WindowEvent::MouseInput {
+                state: ElementState::Released,
+                button: MouseButton::Left,
+                ..
+            } => {
+                if let Some(start) = self.drag_start.take() {
+                    world
+                        .non_send_resource::<Ui>()
+                        .component
+                        .set_drag_active(false);
+                    let cursor = *world.resource::<CursorPos>();
+                    let moved = (cursor.0 - start.0).hypot(cursor.1 - start.1);
+                    if moved < 6.0 {
+                        picking::pick_at(world, self.shift); // a click
+                    } else {
+                        let min = (start.0.min(cursor.0), start.1.min(cursor.1));
+                        let max = (start.0.max(cursor.0), start.1.max(cursor.1));
+                        picking::box_select(world, min, max, self.shift);
+                    }
                 }
             }
             WindowEvent::MouseInput {
@@ -128,14 +177,13 @@ impl ApplicationHandler for App {
                 button: MouseButton::Right,
                 ..
             } => {
-                // Right-click: order the selected pawn to walk to the clicked voxel.
+                // Right-click: order the selected pawns to walk to the clicked voxel.
                 let (scale, in_game) = {
                     let ui = world.non_send_resource::<Ui>();
                     (ui.scale, ui.component.get_in_game())
                 };
-                let logical_x = world.resource::<CursorPos>().0 / scale;
-                if in_game && logical_x > UI_PANEL_WIDTH {
-                    picking::command_pawn(world);
+                if in_game && world.resource::<CursorPos>().0 / scale > UI_PANEL_WIDTH {
+                    picking::command_pawns(world);
                 }
             }
             WindowEvent::KeyboardInput {

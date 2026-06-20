@@ -8,8 +8,8 @@ use bevy_ecs::system::SystemState;
 
 use crate::ecs::components::{Camera, CameraGpu, LightGpu};
 use crate::ecs::resources::{
-    BackgroundColor, DepthTexture, LightMarker, NavOverlay, Pipelines, SelectionBox, SkyboxRes,
-    VoxelGpu,
+    BackgroundColor, DepthTexture, DestinationOverlay, LightMarker, NavOverlay, Pipelines,
+    SelectionOverlay, SkyboxRes, VoxelGpu,
 };
 use crate::render::context::RenderContext;
 use crate::render::texture;
@@ -95,7 +95,8 @@ pub fn render(world: &mut World) {
         Res<SkyboxRes>,
         Res<LightMarker>,
         Res<UiOverlay>,
-        Res<SelectionBox>,
+        Res<SelectionOverlay>,
+        Res<DestinationOverlay>,
         Res<NavOverlay>,
         NonSend<Ui>,
         Query<&CameraGpu>,
@@ -112,7 +113,8 @@ pub fn render(world: &mut World) {
         skybox,
         marker,
         ui_overlay,
-        sel_box,
+        selection_overlay,
+        destination_overlay,
         nav_overlay,
         ui,
         cam_q,
@@ -219,12 +221,15 @@ pub fn render(world: &mut World) {
             // Sky fills pixels the scene didn't cover.
             skybox.0.draw(&mut render_pass);
 
-            // Selection highlight box (drawn on top, ignoring depth).
-            if sel_box.visible {
-                render_pass.set_pipeline(&sel_box.pipeline);
-                render_pass.set_bind_group(0, &sel_box.bind_group, &[]);
-                render_pass.set_vertex_buffer(0, sel_box.edges.slice(..));
-                render_pass.draw(0..24, 0..1);
+            // Line overlays drawn on top, ignoring depth: selection boxes (yellow)
+            // and per-pawn destination markers (green).
+            for overlay in [&selection_overlay.0, &destination_overlay.0] {
+                if overlay.visible && overlay.num_vertices > 0 {
+                    render_pass.set_pipeline(&overlay.pipeline);
+                    render_pass.set_bind_group(0, &overlay.bind_group, &[]);
+                    render_pass.set_vertex_buffer(0, overlay.lines.slice(..));
+                    render_pass.draw(0..overlay.num_vertices, 0..1);
+                }
             }
 
             // Nav-mesh debug overlay (walkable cell links), toggled with `N`.

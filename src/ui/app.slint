@@ -38,6 +38,13 @@ export component AppWindow inherits Window {
     in-out property <bool> exit-requested: false;
     in-out property <bool> regenerate-requested: false;
 
+    // Drag-box selection rectangle (logical px), driven by Rust during a drag.
+    in-out property <bool> drag-active: false;
+    in-out property <float> drag-x;
+    in-out property <float> drag-y;
+    in-out property <float> drag-width;
+    in-out property <float> drag-height;
+
     // Terrain generator parameters (defaults reproduce the startup world).
     in-out property <float> gen-seed: 42;
     in-out property <float> gen-frequency: 0.03;
@@ -294,5 +301,16 @@ export component AppWindow inherits Window {
                 current-index <=> root.animation-clip;
             }
         }
+    }
+
+    // --- Drag-box selection rectangle (over the viewport while dragging) ---
+    if root.drag-active && root.in-game: Rectangle {
+        x: root.drag-x * 1px;
+        y: root.drag-y * 1px;
+        width: root.drag-width * 1px;
+        height: root.drag-height * 1px;
+        background: #4a90d922;
+        border-color: #4a90d9;
+        border-width: 1px;
     }
 }

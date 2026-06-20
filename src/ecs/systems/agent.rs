@@ -2,7 +2,7 @@ use bevy_ecs::prelude::*;
 use glam::{Quat, Vec3};
 use rand::Rng;
 
-use crate::ecs::components::{NavAgent, Transform, Wander};
+use crate::ecs::components::{AnimationPlayer, NavAgent, Pawn, SkinnedMesh, Transform, Wander};
 use crate::ecs::resources::Time;
 use crate::scene::nav::NavMesh;
 use crate::scene::terrain::Heightmap;
@@ -71,6 +71,22 @@ pub fn move_agents(
             transform.translation.y += (target.y - transform.translation.y) * frac;
             // Face the direction of travel (the model's forward is +Z).
             transform.rotation = Quat::from_rotation_y(dir.x.atan2(dir.z));
+        }
+    }
+}
+
+/// Play each pawn's "Walk" clip while it's following a path and "Idle" otherwise.
+/// Runs after `move_agents` so the path state is current.
+pub fn update_pawn_animation(
+    mut pawns: Query<(&NavAgent, &SkinnedMesh, &mut AnimationPlayer), With<Pawn>>,
+) {
+    for (agent, skin, mut player) in &mut pawns {
+        let wanted = if agent.path.is_empty() { "Idle" } else { "Walk" };
+        if let Some(clip) = skin.clips.iter().position(|c| c.name == wanted)
+            && player.clip != clip
+        {
+            player.clip = clip;
+            player.time = 0.0;
         }
     }
 }

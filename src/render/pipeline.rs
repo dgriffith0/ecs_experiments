@@ -4,7 +4,9 @@ use encase::ShaderType;
 use glam::{Mat4, Vec4};
 use wgpu::util::DeviceExt;
 
-use crate::ecs::resources::{NavOverlay, SelectionBox};
+use glam::Vec3;
+
+use crate::ecs::resources::{LineOverlay, NavOverlay};
 use crate::render::texture;
 use crate::scene::nav::NavMesh;
 
@@ -26,29 +28,46 @@ const CUBE_EDGES: [[f32; 3]; 24] = [
     [0.,0.,0.],[0.,1.,0.], [1.,0.,0.],[1.,1.,0.], [1.,0.,1.],[1.,1.,1.], [0.,0.,1.],[0.,1.,1.],
 ];
 
-/// Build the wireframe selection-box resources (pipeline, geometry, uniform).
-pub fn create_selection_box(
+/// The 24 line-list endpoints of an AABB's wireframe, in world space.
+pub fn box_edges(min: Vec3, max: Vec3) -> [[f32; 3]; 24] {
+    let size = max - min;
+    CUBE_EDGES.map(|v| {
+        [
+            min.x + v[0] * size.x,
+            min.y + v[1] * size.y,
+            min.z + v[2] * size.z,
+        ]
+    })
+}
+
+/// Build a reusable world-space line overlay: a `LineList` pipeline (drawn on top,
+/// ignoring depth) reusing the selection shader + uniform, with a `COPY_DST` vertex
+/// buffer sized for `capacity_boxes` wireframe boxes, re-filled each frame.
+pub fn create_line_overlay(
     device: &wgpu::Device,
     color_format: wgpu::TextureFormat,
-) -> SelectionBox {
-    let edges = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
-        label: Some("selection_edges"),
-        contents: bytemuck::cast_slice(&CUBE_EDGES),
-        usage: wgpu::BufferUsages::VERTEX,
+    capacity_boxes: u32,
+) -> LineOverlay {
+    let capacity = capacity_boxes * CUBE_EDGES.len() as u32;
+    let lines = device.create_buffer(&wgpu::BufferDescriptor {
+        label: Some("line_overlay_lines"),
+        size: (capacity as u64) * 12,
+        usage: wgpu::BufferUsages::VERTEX | wgpu::BufferUsages::COPY_DST,
+        mapped_at_creation: false,
     });
 
     let initial = SelUniform {
         mvp: Mat4::IDENTITY,
-        color: Vec4::new(1.0, 0.9, 0.2, 1.0),
+        color: Vec4::ONE,
     };
     let uniform = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
-        label: Some("selection_uniform"),
+        label: Some("line_overlay_uniform"),
         contents: &crate::util::uniform_bytes(&initial),
         usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
     });
 
     let layout = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
-        label: Some("selection_layout"),
+        label: Some("line_overlay_layout"),
         entries: &[wgpu::BindGroupLayoutEntry {
             binding: 0,
             visibility: wgpu::ShaderStages::VERTEX | wgpu::ShaderStages::FRAGMENT,
@@ -122,11 +141,13 @@ pub fn create_selection_box(
         cache: None,
     });
 
-    SelectionBox {
+    LineOverlay {
         pipeline,
-        edges,
         uniform,
         bind_group,
+        lines,
+        capacity,
+        num_vertices: 0,
         visible: false,
     }
 }

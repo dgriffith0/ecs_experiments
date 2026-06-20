@@ -16,19 +16,19 @@ use crate::ecs::components::{
     Camera, CameraGpu, FlyController, LightGpu, Pickable, PointLight, Transform,
 };
 use crate::ecs::resources::{
-    BackgroundColor, CursorPos, DepthTexture, Input, LightMarker, Pipelines, Selected, SkyboxRes,
-    Time, ViewProj, VoxelGpu, VoxelSettingsRes,
+    BackgroundColor, CursorPos, DepthTexture, DestinationOverlay, Input, LightMarker, Pipelines,
+    Selection, SelectionOverlay, SkyboxRes, Time, ViewProj, VoxelGpu, VoxelSettingsRes,
 };
 use crate::ecs::systems::{
     animate, fly_camera, fox_bundles, generate_terrain, move_agents, orbit_light, tree_bundles,
-    update_selection_box, upload_nav_overlay, wander,
-    update_time, update_view_proj, upload_camera, upload_light, upload_model_transforms,
-    upload_skybox, upload_voxel_settings,
+    update_destination_overlay, update_pawn_animation, update_selection_overlay, update_time,
+    update_view_proj, upload_camera, upload_light, upload_model_transforms, upload_nav_overlay,
+    upload_skybox, upload_voxel_settings, wander,
 };
 use crate::assets;
 use crate::render::context::RenderContext;
 use crate::render::draw::render;
-use crate::render::pipeline::{create_nav_overlay, create_render_pipeline, create_selection_box};
+use crate::render::pipeline::{create_line_overlay, create_nav_overlay, create_render_pipeline};
 use crate::scripting::{load_scripts, run_scripts};
 use crate::render::texture;
 use crate::scene::gltf_model;
@@ -49,6 +49,7 @@ pub fn build_schedule() -> Schedule {
         (
             update_time,
             (fly_camera, orbit_light, wander, move_agents),
+            update_pawn_animation,
             run_scripts,
             sync_ui,
             update_view_proj,
@@ -59,7 +60,8 @@ pub fn build_schedule() -> Schedule {
                 upload_voxel_settings,
                 upload_model_transforms,
                 animate,
-                update_selection_box,
+                update_selection_overlay,
+                update_destination_overlay,
                 upload_nav_overlay,
                 render_ui,
             ),
@@ -380,7 +382,9 @@ pub async fn build_world(window: Arc<Window>) -> anyhow::Result<World> {
     let depth_texture =
         texture::Texture::create_depth_texture(&ctx.device, &ctx.config, "depth_texture");
     let skybox = skybox::Skybox::new(&ctx.device, &ctx.queue, &ctx.config).await?;
-    let selection_box = create_selection_box(&ctx.device, ctx.config.format);
+    let selection_overlay = SelectionOverlay(create_line_overlay(&ctx.device, ctx.config.format, 256));
+    let destination_overlay =
+        DestinationOverlay(create_line_overlay(&ctx.device, ctx.config.format, 256));
 
     // Navigation mesh (walkable grid from the heightmap) + its debug overlay.
     let nav_mesh = NavMesh::build(&heightmap);
@@ -436,9 +440,10 @@ pub async fn build_world(window: Arc<Window>) -> anyhow::Result<World> {
     world.insert_resource(ViewProj(cam_uniform.view_proj));
     world.insert_resource(Time::default());
     world.insert_resource(Input::default());
-    world.insert_resource(Selected::default());
+    world.insert_resource(Selection::default());
     world.insert_resource(CursorPos::default());
-    world.insert_resource(selection_box);
+    world.insert_resource(selection_overlay);
+    world.insert_resource(destination_overlay);
     world.insert_resource(nav_mesh);
     world.insert_resource(nav_overlay);
     world.insert_resource(ui_overlay);

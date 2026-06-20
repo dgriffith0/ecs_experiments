@@ -357,25 +357,6 @@ pub fn world_center_xz(grid: u32) -> (f32, f32) {
     (mid - half, mid - half - GRID_Z_PUSH)
 }
 
-/// The grid coordinate `(gx, gy, gz)` and world-space cube `(min, max)` of the
-/// voxel cell containing `point`, snapped to the same grid the meshes use.
-pub fn voxel_cell_at(point: Vec3, grid: u32) -> (glam::IVec3, Vec3, Vec3) {
-    let half = grid_half(grid);
-    let gx = ((point.x + half) / VOXEL_SIZE).floor();
-    let gy = ((point.y - TERRAIN_BASE_Y) / VOXEL_SIZE).floor();
-    let gz = ((point.z + half + GRID_Z_PUSH) / VOXEL_SIZE).floor();
-    let min = Vec3::new(
-        gx * VOXEL_SIZE - half,
-        gy * VOXEL_SIZE + TERRAIN_BASE_Y,
-        gz * VOXEL_SIZE - half - GRID_Z_PUSH,
-    );
-    (
-        glam::IVec3::new(gx as i32, gy as i32, gz as i32),
-        min,
-        min + Vec3::splat(VOXEL_SIZE),
-    )
-}
-
 /// Map a world `(x, z)` to its chunk grid coordinate, or `None` if outside the grid.
 pub fn chunk_coord_at(world_x: f32, world_z: f32, grid: u32) -> Option<(u32, u32)> {
     let half = grid_half(grid);
