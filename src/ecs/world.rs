@@ -13,15 +13,15 @@ use winit::window::Window;
 
 use crate::scene::camera::{self, CameraUniform};
 use crate::ecs::components::{
-    AnimationPlayer, Camera, CameraGpu, FlyController, LightGpu, Pickable, PointLight, Transform,
+    Camera, CameraGpu, FlyController, LightGpu, Pickable, PointLight, Transform,
 };
 use crate::ecs::resources::{
     BackgroundColor, CursorPos, DepthTexture, Input, LightMarker, Pipelines, Selected, SkyboxRes,
     Time, ViewProj, VoxelGpu, VoxelSettingsRes,
 };
 use crate::ecs::systems::{
-    animate, fly_camera, fox_bundles, generate_terrain, orbit_light, update_selection_box,
-    upload_nav_overlay, wander_foxes,
+    animate, fly_camera, fox_bundles, generate_terrain, orbit_light, tree_bundles,
+    update_selection_box, upload_nav_overlay, wander_foxes,
     update_time, update_view_proj, upload_camera, upload_light, upload_model_transforms,
     upload_skybox, upload_voxel_settings,
 };
@@ -345,55 +345,32 @@ pub async fn build_world(window: Arc<Window>) -> anyhow::Result<World> {
         )
     };
 
-    // --- Foxes: scatter `fox_count` instances across the surface, built from a
-    // shared template kept as a resource so regeneration can re-spawn them. ---
-    let fox_template = assets::load_gltf_template(
-        "fox.glb",
+    // --- Assets: load the RON library, then place the entries that declared a
+    // position, and scatter the foxes (a system-spawned, slider-driven entry). ---
+    let (registry, placements) = assets::load_assets(
         &ctx.device,
         &ctx.queue,
         &gltf_texture_layout,
         &gltf_model_layout,
     )
     .await?;
-    for fox in fox_bundles(&ctx.device, &fox_template, &heightmap) {
-        world.spawn(fox);
+    for p in placements {
+        if let Some(asset) = registry.get(&p.name) {
+            let pos = Vec3::new(p.x, heightmap.surface_y(p.x, p.z), p.z);
+            asset.spawn(&mut world, &ctx.device, pos, p.yaw);
+        }
     }
-    world.insert_resource(fox_template);
-
-    // --- A character figure standing in the world (static, playing its idle clip). ---
-    let male = assets::load_gltf_template(
-        "Voxel Pack/Characters/Character_Male_1.gltf",
-        &ctx.device,
-        &ctx.queue,
-        &gltf_texture_layout,
-        &gltf_model_layout,
-    )
-    .await?;
-    if let Some(skin) = male.skin.clone() {
-        let idle = skin
-            .clips
-            .iter()
-            .position(|c| c.name == "Idle")
-            .unwrap_or(0);
-        let (fx, fz) = (16.0, 54.0);
-        world.spawn((
-            male.instantiate(&ctx.device),
-            Transform {
-                translation: Vec3::new(fx, heightmap.surface_y(fx, fz), fz),
-                rotation: glam::Quat::IDENTITY,
-                scale: Vec3::splat(0.6),
-            },
-            skin,
-            AnimationPlayer {
-                clip: idle,
-                time: 0.0,
-                speed: 1.0,
-            },
-            Pickable {
-                local_aabb: male.local_aabb,
-            },
-        ));
+    if let Some(fox) = registry.get("fox") {
+        for bundle in fox_bundles(&ctx.device, fox, &heightmap) {
+            world.spawn(bundle);
+        }
     }
+    if let Some(tree) = registry.get("tree") {
+        for bundle in tree_bundles(&ctx.device, tree, &heightmap) {
+            world.spawn(bundle);
+        }
+    }
+    world.insert_resource(registry);
 
     // Chunk entities are spawned by the `generate_terrain` startup system (below).
 
@@ -430,6 +407,8 @@ pub async fn build_world(window: Arc<Window>) -> anyhow::Result<World> {
     c.set_gen_peakiness(terrain_params.peakiness as f32);
     c.set_gen_layer_blend(terrain_params.layer_blend as f32);
     c.set_gen_fox_count(terrain_params.fox_count as f32);
+    c.set_gen_tree_count(terrain_params.tree_count as f32);
+    c.set_gen_forest_density(terrain_params.forest_density as f32);
     let ui_overlay = ui::create_overlay(&ctx.device, ctx.config.format, ui_w, ui_h);
 
     world.insert_resource(Pipelines {

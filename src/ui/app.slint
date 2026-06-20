@@ -50,6 +50,8 @@ export component AppWindow inherits Window {
     in-out property <float> gen-peakiness: 0.6;
     in-out property <float> gen-layer-blend: 0.12;
     in-out property <float> gen-fox-count: 5;
+    in-out property <float> gen-tree-count: 60;
+    in-out property <float> gen-forest-density: 0.5;
 
     // In-game HUD bindings.
     in-out property <bool> ao-enabled: true;
@@ -203,6 +205,18 @@ export component AppWindow inherits Window {
                 minimum: 0;
                 maximum: 30;
                 value <=> root.gen-fox-count;
+            }
+            ParamRow {
+                label: "Trees";
+                minimum: 0;
+                maximum: 300;
+                value <=> root.gen-tree-count;
+            }
+            ParamRow {
+                label: "Forest";
+                minimum: 0;
+                maximum: 1;
+                value <=> root.gen-forest-density;
             }
 
             Button {

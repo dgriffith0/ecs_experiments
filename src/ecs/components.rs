@@ -93,6 +93,16 @@ pub struct Pickable {
     pub local_aabb: Aabb,
 }
 
+/// Marks a model instance placed declaratively from the asset library (`assets.ron`).
+/// Terrain regeneration re-seats these onto the new surface.
+#[derive(Component)]
+pub struct Placed;
+
+/// Marks a procedurally-scattered tree. Regenerated (despawned + re-scattered)
+/// with the terrain, Poisson-distributed by the `tree_count` parameter.
+#[derive(Component)]
+pub struct Tree;
+
 /// A nav-mesh agent that wanders: it follows a queued path of grid cells (stored
 /// reversed so the next waypoint is the last element), picking a fresh random
 /// destination via A* whenever the path empties.

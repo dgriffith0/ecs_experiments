@@ -1,9 +1,9 @@
 use bevy_ecs::prelude::*;
 use glam::{Quat, Vec3};
 
-use crate::assets::GltfTemplate;
+use crate::assets::{AssetRegistry, LoadedAsset};
 use crate::ecs::components::{
-    AnimationPlayer, FlyController, NavAgent, Pickable, SkinnedMesh, Transform,
+    AnimationPlayer, FlyController, NavAgent, Pickable, Placed, SkinnedMesh, Transform, Tree,
 };
 use crate::ecs::resources::NavOverlay;
 use crate::render::context::RenderContext;
@@ -38,13 +38,14 @@ type FoxBundle = (
 /// phase so they don't move in lockstep. Empty if the template carries no skin.
 pub fn fox_bundles(
     device: &wgpu::Device,
-    template: &GltfTemplate,
+    fox: &LoadedAsset,
     heightmap: &Heightmap,
 ) -> Vec<FoxBundle> {
-    let Some(skin) = &template.skin else {
+    let Some(skin) = &fox.template.skin else {
         return Vec::new();
     };
     let p = heightmap.params();
+    let clip = fox.clip.unwrap_or(0);
     heightmap
         .scatter_surface(p.fox_count)
         .into_iter()
@@ -55,24 +56,59 @@ pub fn fox_bundles(
             let transform = Transform {
                 translation: pos,
                 rotation: Quat::from_rotation_y(yaw),
-                scale: Vec3::splat(0.01),
+                scale: Vec3::splat(fox.scale),
             };
             (
-                template.instantiate(device),
+                fox.template.instantiate(device),
                 transform,
                 skin.clone(),
                 AnimationPlayer {
-                    clip: 1, // Walk
+                    clip,
                     time: phase,
                     speed: 1.0,
                 },
                 Pickable {
-                    local_aabb: template.local_aabb,
+                    local_aabb: fox.template.local_aabb,
                 },
                 NavAgent {
                     path: Vec::new(),
                     speed: 2.5,
                 },
+            )
+        })
+        .collect()
+}
+
+type TreeBundle = (GltfModel, Transform, Pickable, Tree);
+
+/// Build `heightmap.params().tree_count` tree instances at Poisson-distributed
+/// surface points, each with a deterministic random facing.
+pub fn tree_bundles(
+    device: &wgpu::Device,
+    tree: &LoadedAsset,
+    heightmap: &Heightmap,
+) -> Vec<TreeBundle> {
+    let p = heightmap.params();
+    // Keep trees at least their footprint apart so the models never overlap.
+    let aabb = tree.template.local_aabb;
+    let footprint = (aabb.max.x - aabb.min.x).max(aabb.max.z - aabb.min.z) * tree.scale;
+    heightmap
+        .poisson_surface(p.tree_count, footprint)
+        .into_iter()
+        .enumerate()
+        .map(|(i, pos)| {
+            let yaw = terrain::hash01(i as i64, 3, 3, p.seed) * std::f32::consts::TAU;
+            (
+                tree.template.instantiate(device),
+                Transform {
+                    translation: pos,
+                    rotation: Quat::from_rotation_y(yaw),
+                    scale: Vec3::splat(tree.scale),
+                },
+                Pickable {
+                    local_aabb: tree.template.local_aabb,
+                },
+                Tree,
             )
         })
         .collect()
@@ -97,6 +133,8 @@ pub fn regenerate_terrain(world: &mut World) {
             peakiness: c.get_gen_peakiness() as f64,
             layer_blend: c.get_gen_layer_blend() as f64,
             fox_count: c.get_gen_fox_count().round() as u32,
+            tree_count: c.get_gen_tree_count().round() as u32,
+            forest_density: c.get_gen_forest_density() as f64,
         }
     };
     let heightmap = Heightmap::generate(&params);
@@ -128,11 +166,32 @@ pub fn regenerate_terrain(world: &mut World) {
     }
     let foxes = {
         let device = &world.non_send_resource::<RenderContext>().device;
-        let template = world.resource::<GltfTemplate>();
-        fox_bundles(device, template, &heightmap)
+        match world.resource::<AssetRegistry>().get("fox") {
+            Some(fox) => fox_bundles(device, fox, &heightmap),
+            None => Vec::new(),
+        }
     };
     for fox in foxes {
         world.spawn(fox);
+    }
+
+    // Replace the trees: despawn the old ones, re-scatter (Poisson) on the surface.
+    let old_trees: Vec<Entity> = world
+        .query_filtered::<Entity, With<Tree>>()
+        .iter(world)
+        .collect();
+    for e in old_trees {
+        world.despawn(e);
+    }
+    let trees = {
+        let device = &world.non_send_resource::<RenderContext>().device;
+        match world.resource::<AssetRegistry>().get("tree") {
+            Some(tree) => tree_bundles(device, tree, &heightmap),
+            None => Vec::new(),
+        }
+    };
+    for tree in trees {
+        world.spawn(tree);
     }
 
     // Rebuild the nav mesh and refresh its overlay's line buffer.
@@ -170,9 +229,8 @@ pub fn regenerate_terrain(world: &mut World) {
         fly.pitch = pitch;
     }
 
-    // Keep static character figures (skinned, but not foxes) planted on the new surface.
-    let mut figures =
-        world.query_filtered::<&mut Transform, (With<SkinnedMesh>, Without<NavAgent>)>();
+    // Keep declaratively-placed models (`assets.ron`) planted on the new surface.
+    let mut figures = world.query_filtered::<&mut Transform, With<Placed>>();
     for mut t in figures.iter_mut(world) {
         let (x, z) = (t.translation.x, t.translation.z);
         t.translation.y = heightmap.surface_y(x, z);

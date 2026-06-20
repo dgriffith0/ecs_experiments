@@ -1,0 +1,15 @@
+// Asset library: named glTF models loaded once at startup into the AssetRegistry.
+// Fields: name (key), path (under res/), scale, animation (default clip, optional),
+// position ((x,z) on the terrain surface — optional; omit to spawn from a system),
+// yaw (facing, radians, optional). Add models here without touching Rust.
+[
+    (name: "fox", path: "fox.glb", scale: 0.01, animation: Some("Walk")),
+    (name: "tree", path: "Voxel Pack/Environment/Tree_1.gltf", scale: 0.6),
+    (
+        name: "male",
+        path: "Voxel Pack/Characters/Character_Male_1.gltf",
+        scale: 0.6,
+        animation: Some("Idle"),
+        position: Some((16.0, 54.0)),
+    ),
+]

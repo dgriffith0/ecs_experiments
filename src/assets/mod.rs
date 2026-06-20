@@ -4,7 +4,10 @@ use std::io::Cursor;
 use glam::{Mat4, Quat, Vec3};
 use wgpu::util::DeviceExt;
 
-use crate::ecs::components::SkinnedMesh;
+use bevy_ecs::prelude::{Entity, Resource, World};
+use serde::Deserialize;
+
+use crate::ecs::components::{AnimationPlayer, Pickable, Placed, SkinnedMesh, Transform};
 use crate::picking::Aabb;
 use crate::render::texture;
 use crate::scene::animation::{AnimationClip, Channel, ChannelData, Skeleton, Trs};
@@ -412,4 +415,128 @@ fn build_clips(
             }
         })
         .collect()
+}
+
+// --- Asset library (RON-defined) ---
+
+/// One entry in `res/assets.ron`: a named glTF model + how to instance it. The
+/// `position`/`yaw` are optional — if present the asset is auto-placed on the
+/// terrain at load; otherwise a system spawns it wherever it likes.
+#[derive(Deserialize)]
+struct AssetDef {
+    name: String,
+    path: String,
+    scale: f32,
+    #[serde(default)]
+    animation: Option<String>,
+    #[serde(default)]
+    position: Option<(f32, f32)>,
+    #[serde(default)]
+    yaw: f32,
+}
+
+/// A loaded asset: its reusable GPU template plus default instancing parameters.
+pub struct LoadedAsset {
+    pub template: GltfTemplate,
+    pub scale: f32,
+    /// Index of the default animation clip (resolved from its name), if any.
+    pub clip: Option<usize>,
+}
+
+impl LoadedAsset {
+    /// Spawn a world instance at `pos` facing `yaw`. Skinned assets also get their
+    /// `SkinnedMesh` + an `AnimationPlayer` on the default clip; all are `Placed`
+    /// (terrain-seated) and `Pickable`.
+    pub fn spawn(&self, world: &mut World, device: &wgpu::Device, pos: Vec3, yaw: f32) -> Entity {
+        let transform = Transform {
+            translation: pos,
+            rotation: Quat::from_rotation_y(yaw),
+            scale: Vec3::splat(self.scale),
+        };
+        let mut entity = world.spawn((
+            self.template.instantiate(device),
+            transform,
+            Pickable {
+                local_aabb: self.template.local_aabb,
+            },
+            Placed,
+        ));
+        if let Some(skin) = self.template.skin.clone() {
+            entity.insert((
+                skin,
+                AnimationPlayer {
+                    clip: self.clip.unwrap_or(0),
+                    time: 0.0,
+                    speed: 1.0,
+                },
+            ));
+        }
+        entity.id()
+    }
+}
+
+/// Named registry of loaded assets, shared as a resource so any system can spawn
+/// instances by name.
+#[derive(Resource)]
+pub struct AssetRegistry(HashMap<String, LoadedAsset>);
+
+impl AssetRegistry {
+    pub fn get(&self, name: &str) -> Option<&LoadedAsset> {
+        self.0.get(name)
+    }
+}
+
+/// An asset that `res/assets.ron` asked to be auto-placed, for the caller to spawn
+/// on the surface once the heightmap exists.
+pub struct Placement {
+    pub name: String,
+    pub x: f32,
+    pub z: f32,
+    pub yaw: f32,
+}
+
+/// Load every asset declared in `res/assets.ron` into a registry, and collect the
+/// ones with a fixed `position` as `Placement`s for the caller to drop on the map.
+pub async fn load_assets(
+    device: &wgpu::Device,
+    queue: &wgpu::Queue,
+    texture_layout: &wgpu::BindGroupLayout,
+    model_layout: &wgpu::BindGroupLayout,
+) -> anyhow::Result<(AssetRegistry, Vec<Placement>)> {
+    let text = load_string("assets.ron").await?;
+    let defs: Vec<AssetDef> =
+        ron::from_str(&text).map_err(|e| anyhow::anyhow!("assets.ron: {e}"))?;
+
+    let mut registry = HashMap::new();
+    let mut placements = Vec::new();
+    for def in defs {
+        let template =
+            load_gltf_template(&def.path, device, queue, texture_layout, model_layout).await?;
+        // Resolve the default clip name to its index in the skeleton's clips.
+        let clip = def.animation.as_ref().and_then(|name| {
+            template
+                .skin
+                .as_ref()?
+                .clips
+                .iter()
+                .position(|c| &c.name == name)
+        });
+        if let Some((x, z)) = def.position {
+            placements.push(Placement {
+                name: def.name.clone(),
+                x,
+                z,
+                yaw: def.yaw,
+            });
+        }
+        registry.insert(
+            def.name,
+            LoadedAsset {
+                template,
+                scale: def.scale,
+                clip,
+            },
+        );
+    }
+    Ok((AssetRegistry(registry), placements))
 }

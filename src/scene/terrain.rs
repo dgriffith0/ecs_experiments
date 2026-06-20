@@ -16,6 +16,7 @@ use block_mesh::{
     visible_block_faces, UnitQuadBuffer, Voxel, VoxelVisibility, RIGHT_HANDED_Y_UP_CONFIG,
 };
 use encase::ShaderType;
+use fast_poisson::Poisson2D;
 use glam::{IVec3, UVec2, Vec3};
 use noise::{Curve, Fbm, MultiFractal, NoiseFn, Perlin};
 use wgpu::util::DeviceExt;
@@ -57,10 +58,17 @@ pub struct TerrainParams {
     pub layer_blend: f64,
     /// How many foxes to scatter across the surface; clamped to `[0, MAX_FOXES]`.
     pub fox_count: u32,
+    /// Approximate number of Poisson-distributed trees; clamped to `[0, MAX_TREES]`.
+    pub tree_count: u32,
+    /// Fraction of the map that is forest (`0..1`). A low-frequency noise mask
+    /// keeps trees in the densest regions, leaving the rest as clearings.
+    pub forest_density: f64,
 }
 
 /// Most foxes the generator allows.
 pub const MAX_FOXES: u32 = 64;
+/// Most trees the generator allows.
+pub const MAX_TREES: u32 = 400;
 
 impl Default for TerrainParams {
     /// Reproduces the original world: `Fbm::new(42)` defaults + a `×0.03` scale.
@@ -77,6 +85,8 @@ impl Default for TerrainParams {
             peakiness: 0.6,
             layer_blend: 0.12,
             fox_count: 5,
+            tree_count: 60,
+            forest_density: 0.5,
         }
     }
 }
@@ -93,6 +103,8 @@ impl TerrainParams {
             peakiness: self.peakiness.clamp(0.0, 1.0),
             layer_blend: self.layer_blend.clamp(0.0, 0.35),
             fox_count: self.fox_count.min(MAX_FOXES),
+            tree_count: self.tree_count.min(MAX_TREES),
+            forest_density: self.forest_density.clamp(0.0, 1.0),
             ..*self
         }
     }
@@ -112,6 +124,12 @@ fn grid_half(grid: u32) -> f32 {
 
 fn lerp(a: f64, b: f64, t: f64) -> f64 {
     a + (b - a) * t
+}
+
+/// Smooth 0→1 ramp between `e0` and `e1` (Hermite), clamped outside.
+fn smoothstep(e0: f32, e1: f32, x: f32) -> f32 {
+    let t = ((x - e0) / (e1 - e0)).clamp(0.0, 1.0);
+    t * t * (3.0 - 2.0 * t)
 }
 
 /// Build the shaped height field: a base Fbm run through a `Curve` whose control
@@ -263,6 +281,61 @@ impl Heightmap {
                 Vec3::new(x, self.surface_y(x, z), z)
             })
             .collect()
+    }
+
+    /// Voxel-centre points for trees: an even, no-overlap **Poisson-disk** base
+    /// (min spacing = `max(count radius, min_spacing)`) masked by a low-frequency
+    /// noise field so points survive only in the densest regions — giving clumped
+    /// **forests with clearings** rather than uniform coverage. `forest_density`
+    /// (`0..1`) sets how much of the map is forest. Each point snaps to its voxel.
+    pub fn poisson_surface(&self, count: u32, min_spacing: f32) -> Vec<Vec3> {
+        if count == 0 {
+            return Vec::new();
+        }
+        const MARGIN: f32 = 3.0;
+        /// Spatial frequency of the forest mask — sets grove size (~1/FREQ metres).
+        const FOREST_FREQ: f64 = 0.05;
+        /// Soft width of the grove edge (in mask units) for a density falloff.
+        const EDGE: f32 = 0.18;
+        let (cx, cz) = world_center_xz(self.grid);
+        let half = world_span(self.grid) / 2.0;
+        let (x0, z0) = (cx - half + MARGIN, cz - half + MARGIN);
+        let extent = (world_span(self.grid) - 2.0 * MARGIN).max(1.0);
+
+        // A *dense*, no-overlap candidate base (footprint spacing). Forests are then
+        // carved out of it, so grove cores are packed tight rather than uniform.
+        let radius = min_spacing.max(1.0);
+        // `coverage` (Forest slider) → how much of the map is grove; `amount` (Trees
+        // slider) → how densely those groves fill, thinning the base probabilistically.
+        let coverage = self.params.forest_density as f32;
+        let amount = (count as f32 / 200.0).clamp(0.0, 1.0);
+        // Grove mask: smooth low-frequency field, seeded apart from the terrain.
+        let mask = Fbm::<Perlin>::new(self.params.seed.wrapping_add(0x5EED)).set_octaves(3);
+        let threshold = 1.0 - coverage; // high-noise regions are groves
+
+        let mut points: Vec<Vec3> = Poisson2D::new()
+            .with_dimensions([extent as f64, extent as f64], radius as f64)
+            .with_seed(self.params.seed as u64)
+            .generate()
+            .into_iter()
+            .filter_map(|[px, pz]| {
+                let (wx, wz) = (x0 + px as f32, z0 + pz as f32);
+                let n = ((mask.get([wx as f64 * FOREST_FREQ, wz as f64 * FOREST_FREQ]) + 1.0) * 0.5)
+                    as f32;
+                // Density: full inside a grove, fading across its edge, zero in
+                // clearings; `amount` thins the whole field.
+                let keep = smoothstep(threshold - EDGE, threshold + EDGE, n) * amount;
+                let (gx, gz) = self.cell_coords(wx, wz);
+                if hash01(gx as i64, 7, gz as i64, self.params.seed) <= keep {
+                    // Snap to the voxel centre so the placed model sits on the block.
+                    Some(self.cell_center(gx as i64, gz as i64))
+                } else {
+                    None
+                }
+            })
+            .collect();
+        points.truncate(MAX_TREES as usize);
+        points
     }
 }
 

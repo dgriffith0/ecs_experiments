@@ -10,6 +10,7 @@ block-mesh = "0.2.0"
 bytemuck = "1.25.0"
 encase = "0.12.0"
 env_logger = "0.11.10"
+fast_poisson = "1.0"
 glam = { version = "0.33.1", features = ["encase"] }
 gltf = "1.4.1"
 image = "0.25.10"
@@ -18,7 +19,8 @@ noise = "0.9.0"
 pathfinding = "4.15.0"
 pollster = "0.4.0"
 rand = "0.9"
-serde = "1.0.228"
+ron = "0.8"
+serde = { version = "1.0.228", features = ["derive"] }
 slint = { version = "1.16.1", default-features = false, features = ["compat-1-2", "std", "renderer-software"] }
 tobj = { version = "4.0.3", features = ["tokio", "async"] }
 wgpu = "29.0.3"
