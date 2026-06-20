@@ -13,7 +13,7 @@ use winit::window::Window;
 
 use crate::scene::camera::{self, CameraUniform};
 use crate::ecs::components::{
-    Camera, CameraGpu, FlyController, LightGpu, Pickable, PointLight, Transform,
+    AnimationPlayer, Camera, CameraGpu, FlyController, LightGpu, Pickable, PointLight, Transform,
 };
 use crate::ecs::resources::{
     BackgroundColor, CursorPos, DepthTexture, Input, LightMarker, Pipelines, Selected, SkyboxRes,
@@ -359,6 +359,41 @@ pub async fn build_world(window: Arc<Window>) -> anyhow::Result<World> {
         world.spawn(fox);
     }
     world.insert_resource(fox_template);
+
+    // --- A character figure standing in the world (static, playing its idle clip). ---
+    let male = assets::load_gltf_template(
+        "Voxel Pack/Characters/Character_Male_1.gltf",
+        &ctx.device,
+        &ctx.queue,
+        &gltf_texture_layout,
+        &gltf_model_layout,
+    )
+    .await?;
+    if let Some(skin) = male.skin.clone() {
+        let idle = skin
+            .clips
+            .iter()
+            .position(|c| c.name == "Idle")
+            .unwrap_or(0);
+        let (fx, fz) = (16.0, 54.0);
+        world.spawn((
+            male.instantiate(&ctx.device),
+            Transform {
+                translation: Vec3::new(fx, heightmap.surface_y(fx, fz), fz),
+                rotation: glam::Quat::IDENTITY,
+                scale: Vec3::splat(0.6),
+            },
+            skin,
+            AnimationPlayer {
+                clip: idle,
+                time: 0.0,
+                speed: 1.0,
+            },
+            Pickable {
+                local_aabb: male.local_aabb,
+            },
+        ));
+    }
 
     // Chunk entities are spawned by the `generate_terrain` startup system (below).
 

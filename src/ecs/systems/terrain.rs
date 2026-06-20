@@ -117,9 +117,10 @@ pub fn regenerate_terrain(world: &mut World) {
         world.spawn(chunk);
     }
 
-    // Replace the foxes: despawn the old ones, scatter a fresh set on the surface.
+    // Replace the foxes: despawn the old ones (foxes carry a `NavAgent`, so this
+    // leaves other skinned characters alone), scatter a fresh set on the surface.
     let old_foxes: Vec<Entity> = world
-        .query_filtered::<Entity, With<SkinnedMesh>>()
+        .query_filtered::<Entity, With<NavAgent>>()
         .iter(world)
         .collect();
     for e in old_foxes {
@@ -167,6 +168,14 @@ pub fn regenerate_terrain(world: &mut World) {
         t.translation = cam;
         fly.yaw = yaw;
         fly.pitch = pitch;
+    }
+
+    // Keep static character figures (skinned, but not foxes) planted on the new surface.
+    let mut figures =
+        world.query_filtered::<&mut Transform, (With<SkinnedMesh>, Without<NavAgent>)>();
+    for mut t in figures.iter_mut(world) {
+        let (x, z) = (t.translation.x, t.translation.z);
+        t.translation.y = heightmap.surface_y(x, z);
     }
 
     world.insert_resource(heightmap);
